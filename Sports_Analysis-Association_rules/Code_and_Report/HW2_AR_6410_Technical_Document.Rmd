@@ -1,0 +1,1667 @@
+---
+title: "HW2 6410 Association Rules"
+author: "Jordan Boonstra, Henrik Kowalkowski, Prasanna Rajendran, Shashank Singh, Shawn Tangen, Coltt Thunstrom"
+date: "October 3, 2018"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: 2
+---
+
+```{r include=FALSE}
+# Load Packages
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(arules)
+library(mltools)
+library(gridExtra)
+library(png)
+library(grid)
+```
+
+# Introduction  
+
+## Atletico Madrid's Situation  
+
+Our team, Atletico Madrid, plays in Spain's premier professional football league, La Liga, which is widely considered to be one of the planet's most competitive and popular leagues. It boasts many of the world's top players and includes arguably the two best professional football teams in FC Barcelona and Real Madrid. Since your hiring for the 2011-2012 season, we have won La Liga once in 2013-2014, but have finished in third or worse the other four years. In terms of points, we have compiled the third most (388) in the league since 2011, while FC Barcelona and Real Madrid earned totals of 463 and 454 points, respectively.  
+
+## The Business Problem and Approach  
+
+Our job as recently hired data scientists is to find exploitable patterns both on and off the field that can be used to increase success and decrease failure on the field. Intuitively, success is defined as winning a match, and a failure is losing a match. A draw can be a success or a failure depending on the situation; in particular, we want to ensure that we beat teams that we are supposed to beat, and at least tie teams that we are supposed to lose to. For example, a home draw against a weaker team would be a poor result from two dimensions. We are a better team in this scenario and we have home field advantage. We try to filter our analysis through this lens. Figure 1., below, gives a more detailed explanation of situational outcomes.  
+
+**Figure 1: Outcome Matrix**  
+```{r echo=FALSE, fig.width=3, fig.height=3, fig.align='center'}
+img <- readPNG("C:/Users/henri/Google Drive/School/2018-2019 Carlson MSBA/2018 Exploratory Data Analytics 6410/HW 2/Our_Approach.png")
+grid.raster(img)
+#![Outcome Matrix](C:\Users\henri\Google Drive\School\2018-2019 Carlson MSBA\2018 Exploratory Data Analytics 6410\HW 2\Our_Approach.png)
+```
+
+The long-term goal is to consistently best FC Barcelona and Real Madrid in total points per season and win La Liga, which will increase revenue and popularity of our team. In order to do this, we have to understand how our team compares to FC Barcelona, Real Madrid, and the rest of the teams in La Liga. By finding out what works for other teams (FC Barcelona and Real Madrid in particular), and what works/does not work for us when we play them, we can formulate a strategy that will aid us in our objective of becoming league champions year after year.  
+
+We structured the analysis into two separate disciplines:   
+1. Team tactics  
+2. Roster management and player development.    
+
+Team tactics mainly consists of on-field decisions, and the analysis will use association rules to discern what formations and team-play strategies work best (and worst) for the team. Roster management and player development looks at the team's individual players, and association rules and comparative analysis will be used to uncover what positional and skill areas our players excel and lack at. It will also provide recommendations on how we should train our players for the future based on our team tactics, as well as what players may need to be replaced or acquired during the transfer window. As previously referenced, you, Diego Simeone, were hired midway through the 2011-2012 season, so the data is subsetted to reflect your tenure.  
+
+# Data Preparation  
+We have a comprehensive and complex database to draw insights from. The following data manipulation represents our efforts to shape the data and facilitate analysis. Given the repetitive nature of the code structure, we have suppressed some output and described it with text to provide a more concise and focused summary or our cleaning and aggregation.  
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+## Creating Connections  
+Our data belongs to a SQL database, we connect to it with the dplyr package and then collect it within memory to make it available for reshaping. We also load a series of packages to aid data munging and visualization.  
+
+```{r}
+# Create Connections
+
+setwd("C:/Users/henri/Documents/Large_Data_Files/HW2_6410")
+con <- src_sqlite("euro_soccer.sqlite")
+
+country_tbl <- tbl(con, "country")
+league_tbl <- tbl(con, "league")
+match_tbl <- tbl(con, "match")
+player_tbl <- tbl(con, "player")
+player_atts_tbl <- tbl(con, "player_attributes")
+team_tbl <- tbl(con, "team")
+team_atts_tbl <- tbl(con, "team_attributes")
+
+#Connecting the databases to a dataframe
+country <- data.frame(collect(country_tbl))
+league <- data.frame(collect(league_tbl))
+match <- data.frame(collect(match_tbl))
+player <- data.frame(collect(player_tbl))
+player_attributes <- data.frame(collect(player_atts_tbl))
+team <- data.frame(collect(team_tbl))
+team_attributes <-data.frame(collect(team_atts_tbl))
+
+rm(country_tbl, league_tbl, match_tbl, player_tbl, player_atts_tbl, team_tbl, team_atts_tbl, con)
+```
+
+## Setting up the General Data  
+In this section of the data aggregation we filter for Atletico, join tables and set variable types.  
+
+```{r}
+# Assign desired Team Name 
+mac <- "AtlÃ©tico Madrid"
+pc <- "Atlético Madrid"
+long_team_name <- pc
+
+#Join team_name, country and league
+#change home_team_name
+match_join <- match %>%
+  left_join(select(team,team_api_id, team_long_name), by = c("home_team_api_id"= 'team_api_id'))
+#rename column to home_team_name
+match_join <- dplyr::rename(match_join,home_team_name = team_long_name)
+
+#change away_team_name
+match_join <- match_join %>%
+  left_join(select(team,team_api_id, team_long_name), by = c("away_team_api_id"= 'team_api_id'))
+#rename column to away_team_name
+match_join <- dplyr::rename(match_join,away_team_name = team_long_name)
+
+#Join Player_name, Birthday, height and weight to player_attributes
+player_data <- 
+  player_attributes %>% 
+  left_join(select(player,-id),
+            by = c("player_fifa_api_id"= "player_fifa_api_id",
+                   "player_api_id"="player_api_id"))
+
+#Join Team Name to Attributes
+team_data <- team_attributes %>%
+  left_join(select(team,-id,-team_short_name),
+            by = c("team_fifa_api_id"= "team_fifa_api_id","team_api_id"="team_api_id"))
+
+#Converting date to year
+team_data <- team_data %>% mutate(year = lubridate::year(ymd_hms(date)))
+
+#Filter for Atletico only
+match_filter <- match_join %>%
+  filter(str_detect(home_team_name,long_team_name) | str_detect(away_team_name,long_team_name))
+
+#Join country to the filtered data
+match_filter <- match_filter %>%
+  left_join(country, by = c("country_id"= "id"))
+
+match_filter <- dplyr::rename(match_filter,country = name)
+
+#Join league to the filtered data
+match_filter <- match_filter %>%
+  left_join(select(league,country_id, name), by = c("country_id"= 'country_id'))
+
+match_filter <- dplyr::rename(match_filter,league = name)
+
+#Matches won. lost and drawn
+
+match_filter <- match_filter %>% 
+  mutate(Outcome = ifelse(str_detect(home_team_name,long_team_name)
+                          & home_team_goal > away_team_goal,'W',
+                        ifelse(str_detect(home_team_name,long_team_name)
+                               & home_team_goal < away_team_goal,'L', 
+                               ifelse(str_detect(home_team_name,long_team_name)
+                                      & home_team_goal == away_team_goal,'D', 
+                                      ifelse(str_detect(away_team_name,long_team_name)
+                                             & home_team_goal < away_team_goal,'W',
+                                             ifelse(str_detect(away_team_name,long_team_name)
+                                                    & home_team_goal > away_team_goal,'L','D'))))))
+
+#Removing XML columns - Very detailed information
+
+drop.cols <- c('goal','shoton','shotoff','foulcommit','card','cross','corner','possession')
+
+match_filter2 <- match_filter %>% select(-drop.cols)
+
+```
+
+## Identifying Positions  
+This code provides the basis for our analysis regarding team structure, formations and positional level statistics. We have truncated the output as the following code is replicated many times over for all 22 starting positions in a match.  
+
+```{r }
+# Identifying postions on field with respect to Y positions:
+# Y =1 :G, 1<Y<5 : D, 5=<Y<=8 : M, Y >= 9 : A 
+# Position for home_player_1
+
+match_filter2 <- match_filter2 %>% 
+  mutate(home_player_pos1 = 
+           ifelse(home_player_Y1 == 1,'G',
+                  ifelse(home_player_Y1 > 1 & home_player_Y1 < 5,'D',
+                         ifelse(home_player_Y1 >= 5 & home_player_Y1 < 9,'M','A'))))
+```
+
+```{r include=FALSE}
+# Position for home_player_2
+match_filter2 <- match_filter2 %>% mutate (home_player_pos2 = ifelse(home_player_Y2 == 1,'G',
+                                                           ifelse(home_player_Y2 > 1 & home_player_Y2 < 5,'D',
+                                                           ifelse(home_player_Y2 >= 5 & home_player_Y2 < 9,'M','A'))))
+
+# Position for home_player_3
+
+match_filter2 <- match_filter2 %>% mutate (home_player_pos3 = ifelse(home_player_Y3 == 1,'G',
+                                                                     ifelse(home_player_Y3 > 1 & home_player_Y3 < 5,'D',
+                                                                            ifelse(home_player_Y3 >= 5 & home_player_Y3 < 9,'M','A'))))
+# Position for home_player_4
+match_filter2 <- match_filter2 %>% mutate (home_player_pos4 = ifelse(home_player_Y4 == 1,'G',
+                                                                     ifelse(home_player_Y4 > 1 & home_player_Y4 < 5,'D',
+                                                                            ifelse(home_player_Y4 >= 5 & home_player_Y4 < 9,'M','A'))))
+
+# Position for home_player_5
+
+match_filter2 <- match_filter2 %>% mutate (home_player_pos5 = ifelse(home_player_Y5 == 1,'G',
+                                                                     ifelse(home_player_Y5 > 1 & home_player_Y5 < 5,'D',
+                                                                            ifelse(home_player_Y5 >= 5 & home_player_Y5 < 9,'M','A'))))
+# Position for home_player_6
+match_filter2 <- match_filter2 %>% mutate (home_player_pos6 = ifelse(home_player_Y6 == 1,'G',
+                                                                     ifelse(home_player_Y6 > 1 & home_player_Y6 < 5,'D',
+                                                                            ifelse(home_player_Y6 >= 5 & home_player_Y6 < 9,'M','A'))))
+
+# Position for home_player_7
+
+match_filter2 <- match_filter2 %>% mutate (home_player_pos7 = ifelse(home_player_Y7 == 1,'G',
+                                                                     ifelse(home_player_Y7 > 1 & home_player_Y7 < 5,'D',
+                                                                            ifelse(home_player_Y7 >= 5 & home_player_Y7 < 9,'M','A'))))
+# Position for home_player_8
+match_filter2 <- match_filter2 %>% mutate (home_player_pos8 = ifelse(home_player_Y8 == 1,'G',
+                                                                     ifelse(home_player_Y8 > 1 & home_player_Y8 < 5,'D',
+                                                                            ifelse(home_player_Y8 >= 5 & home_player_Y8 < 9,'M','A'))))
+
+# Position for home_player_9
+
+match_filter2 <- match_filter2 %>% mutate (home_player_pos9 = ifelse(home_player_Y9 == 1,'G',
+                                                                     ifelse(home_player_Y9 > 1 & home_player_Y9 < 5,'D',
+                                                                            ifelse(home_player_Y9 >= 5 & home_player_Y9 < 9,'M','A'))))
+# Position for home_player_10
+match_filter2 <- match_filter2 %>% mutate (home_player_pos10 = ifelse(home_player_Y10 == 1,'G',
+                                                                     ifelse(home_player_Y10 > 1 & home_player_Y10 < 5,'D',
+                                                                            ifelse(home_player_Y10 >= 5 & home_player_Y10 < 9,'M','A'))))
+
+# Position for home_player_11
+match_filter2 <- match_filter2 %>% mutate (home_player_pos11 = ifelse(home_player_Y11 == 1,'G',
+                                                                      ifelse(home_player_Y11 > 1 & home_player_Y11 < 5,'D',
+                                                                             ifelse(home_player_Y11 >= 5 & home_player_Y11 < 9,'M','A'))))
+# Position for away_player_1
+
+match_filter2 <- match_filter2 %>% mutate (away_player_pos1 = ifelse(away_player_Y1 == 1,'G',
+                                                                     ifelse(away_player_Y1 > 1 & away_player_Y1 < 5,'D',
+                                                                            ifelse(away_player_Y1 >= 5 & away_player_Y1 < 9,'M','A'))))
+# Position for away_player_2
+match_filter2 <- match_filter2 %>% mutate (away_player_pos2 = ifelse(away_player_Y2 == 1,'G',
+                                                                     ifelse(away_player_Y2 > 1 & away_player_Y2 < 5,'D',
+                                                                            ifelse(away_player_Y2 >= 5 & away_player_Y2 < 9,'M','A'))))
+
+# Position for away_player_3
+
+match_filter2 <- match_filter2 %>% mutate (away_player_pos3 = ifelse(away_player_Y3 == 1,'G',
+                                                                     ifelse(away_player_Y3 > 1 & away_player_Y3 < 5,'D',
+                                                                            ifelse(away_player_Y3 >= 5 & away_player_Y3 < 9,'M','A'))))
+# Position for away_player_4
+match_filter2 <- match_filter2 %>% mutate (away_player_pos4 = ifelse(away_player_Y4 == 1,'G',
+                                                                     ifelse(away_player_Y4 > 1 & away_player_Y4 < 5,'D',
+                                                                            ifelse(away_player_Y4 >= 5 & away_player_Y4 < 9,'M','A'))))
+
+# Position for away_player_5
+
+match_filter2 <- match_filter2 %>% mutate (away_player_pos5 = ifelse(away_player_Y5 == 1,'G',
+                                                                     ifelse(away_player_Y5 > 1 & away_player_Y5 < 5,'D',
+                                                                            ifelse(away_player_Y5 >= 5 & away_player_Y5 < 9,'M','A'))))
+# Position for away_player_6
+match_filter2 <- match_filter2 %>% mutate (away_player_pos6 = ifelse(away_player_Y6 == 1,'G',
+                                                                     ifelse(away_player_Y6 > 1 & away_player_Y6 < 5,'D',
+                                                                            ifelse(away_player_Y6 >= 5 & away_player_Y6 < 9,'M','A'))))
+
+# Position for away_player_7
+
+match_filter2 <- match_filter2 %>% mutate (away_player_pos7 = ifelse(away_player_Y7 == 1,'G',
+                                                                     ifelse(away_player_Y7 > 1 & away_player_Y7 < 5,'D',
+                                                                            ifelse(away_player_Y7 >= 5 & away_player_Y7 < 9,'M','A'))))
+# Position for away_player_8
+match_filter2 <- match_filter2 %>% mutate (away_player_pos8 = ifelse(away_player_Y8 == 1,'G',
+                                                                     ifelse(away_player_Y8 > 1 & away_player_Y8 < 5,'D',
+                                                                            ifelse(away_player_Y8 >= 5 & away_player_Y8 < 9,'M','A'))))
+
+# Position for away_player_9
+
+match_filter2 <- match_filter2 %>% mutate (away_player_pos9 = ifelse(away_player_Y9 == 1,'G',
+                                                                     ifelse(away_player_Y9 > 1 & away_player_Y9 < 5,'D',
+                                                                            ifelse(away_player_Y9 >= 5 & away_player_Y9 < 9,'M','A'))))
+# Position for away_player_10
+match_filter2 <- match_filter2 %>% mutate (away_player_pos10 = ifelse(away_player_Y10 == 1,'G',
+                                                                      ifelse(away_player_Y10 > 1 & away_player_Y10 < 5,'D',
+                                                                             ifelse(away_player_Y10 >= 5 & away_player_Y10 < 9,'M','A'))))
+
+# Position for away_player_11
+match_filter2 <- match_filter2 %>% mutate (away_player_pos11 = ifelse(away_player_Y11 == 1,'G',
+                                                                      ifelse(away_player_Y11 > 1 & away_player_Y11 < 5,'D',
+                                                                           ifelse(away_player_Y11 >= 5 & away_player_Y11 < 9,'M','A'))))
+```
+
+## Count Players by Field Location  
+Having aggregated the positions of each player for a specific match, we count the positions at each match so that we have an idea of the formation that a team played. Formations take the form '4-5-1' or '4-4-2' and so on. They are read left to right, i.e. a '4-4-2' is 4 defenders, 4 midfielders and 2 attackers.  
+
+```{r }
+# Find #of defenders/midfields/attackers -Home & Away
+
+pos <- c('home_player_pos1','home_player_pos2','home_player_pos3','home_player_pos4',
+         'home_player_pos5','home_player_pos6','home_player_pos7','home_player_pos8',
+         'home_player_pos9','home_player_pos10','home_player_pos11') 
+
+match_filter2$defs_home <- apply(match_filter2[114:124],1, function(x) length(which(x=='D')))
+
+match_filter2$mids_home <- apply(match_filter2[114:124],1, function(x) length(which(x=='M')))
+
+match_filter2$attacks_home <- apply(match_filter2[114:124],1, function(x) length(which(x=='A')))
+
+match_filter2$defs_away <- apply(match_filter2[125:135],1, function(x) length(which(x=='D')))
+
+match_filter2$mids_away <- apply(match_filter2[125:135],1, function(x) length(which(x=='M')))
+
+match_filter2$attacks_away <- apply(match_filter2[125:135],1, function(x) length(which(x=='A')))
+
+# Team_formations (Home&Away)
+match_filter2 <- match_filter2 %>% mutate(homeformation = 
+                                            paste(defs_home,mids_home,attacks_home,sep ='-'))
+match_filter2 <- match_filter2 %>% mutate(awayformation = 
+                                            paste(defs_away,mids_away,attacks_away,sep ='-'))
+```
+
+## Create Data Views  
+The following data views allow us to focus our analysis on different aspects of a match.  
+
+```{r }
+#Removing unneccesary columns and arranging the dataset
+
+match_filter3 <- match_filter2 %>% 
+  select(id,country,league,season,stage,date,match_api_id,home_team_api_id,home_team_name,
+         away_team_api_id,away_team_name,home_team_goal,away_team_goal,homeformation,awayformation,
+         Outcome,home_player_1,home_player_pos1,home_player_2,home_player_pos2,home_player_3,
+         home_player_pos3,home_player_4,home_player_pos4,home_player_5,home_player_pos5,
+         home_player_6,home_player_pos6,home_player_7,home_player_pos7,home_player_8,
+         home_player_pos8,home_player_9,home_player_pos9,home_player_10,home_player_pos10,
+         home_player_11,home_player_pos11,away_player_1,away_player_pos1,away_player_2,
+         away_player_pos2,away_player_3,away_player_pos3,away_player_4,away_player_pos4,
+         away_player_5,away_player_pos5,away_player_6,away_player_pos6,away_player_7,
+         away_player_pos7,away_player_8,away_player_pos8,away_player_9,away_player_pos9,
+         away_player_10,away_player_pos10,away_player_11,away_player_pos11,B365H,B365D,B365A,
+         BWH,BWD,BWA,IWH,IWD,IWA,LBH,LBD,LBA,PSH,PSD,PSA,WHH,WHD,WHA,SJH,SJD,SJA,VCH,VCD,VCA,
+         GBH,GBD,GBA,BSH,BSD,BSA)
+
+#convert date to year
+
+match_filter3 <- match_filter3 %>% mutate(year = lubridate::year(ymd_hms(date)))
+
+#Join Team attributes to the data
+
+match_filter4 <- match_filter3 %>%
+  left_join(select(team_data,-id,-team_long_name),
+            by = c("home_team_api_id"= 'team_api_id',"year" = "year"))
+
+# Define the team formation for Atletico
+match_filter3 <- match_filter3 %>% 
+  mutate(team_formation = ifelse(home_team_name == long_team_name,homeformation,awayformation))
+#Define the gametype i.e. home or away for the team
+match_filter3 <- match_filter3 %>% 
+  mutate(gametype = ifelse(home_team_name == long_team_name,"home","away"))
+```
+
+## Normalize Bets to Categorize the Quality of Atletico's Opponent  
+The following code is truncated for brevity. It allows us to quantitatively understand when Atletico is playing a stronger opponent (in most cases Real Madrid or Barcelona), or a weaker/equal strength opponent.  
+
+```{r}
+## Normalize Bets across platforms to understand Weak/Strong teams
+
+#Average of all bets across platforms for Home
+match_filter4 <- match_filter3 %>% 
+  mutate(BetsHome = rowMeans(cbind(B365H,BWH,IWH,LBH,WHH,SJH,VCH,GBH,BSH),na.rm = T)) 
+```
+
+```{r include=FALSE}
+#Average of all bets across platforms for Away
+match_filter4 <- match_filter4 %>% 
+  mutate(BetsAway = rowMeans(cbind(B365A,BWA,IWA,LBA,WHA,SJA,VCA,GBA,BSA),na.rm = T)) 
+
+
+#Average of all bets across platforms for Draw
+match_filter4 <- match_filter4 %>% 
+  mutate(BetsDraw = rowMeans(cbind(B365D,BWD,IWD,LBD,WHD,SJD,VCD,GBD,BSD),na.rm = T)) 
+
+
+#Understanding Weak or Strong Team
+
+match_filter4 <- match_filter4 %>% 
+  mutate(Opp_Type = ifelse(gametype == "home",
+                           ifelse(BetsHome < BetsAway & BetsHome < BetsDraw,'Weak',
+                                  ifelse(BetsAway < BetsHome & BetsAway < BetsDraw,'Strong','Equal')), 
+                           ifelse(BetsAway < BetsHome & BetsAway < BetsDraw,'Weak',
+                                  ifelse(BetsHome < BetsHome & BetsHome < BetsDraw,'Strong','Equal'))))
+                                                                              
+#Column Cleanup
+match_filter4 <- match_filter4 %>%
+  select(id,country,league,season,year,match_api_id,stage,date, home_team_api_id,home_team_name,
+         away_team_api_id,away_team_name,home_team_goal,away_team_goal,homeformation,
+         awayformation,Outcome,Opp_Type,team_formation,gametype,home_player_1,home_player_1,
+         home_player_2,home_player_3,home_player_4,home_player_5,home_player_6,home_player_7,
+         home_player_8,home_player_9,home_player_10,home_player_11,away_player_1,
+         away_player_2,away_player_3,away_player_4,away_player_5,away_player_6,away_player_7,
+         away_player_8,away_player_9,away_player_10,away_player_11,home_player_pos1,
+         home_player_pos2,home_player_pos3,home_player_pos4,home_player_pos5,home_player_pos6,
+         home_player_pos7,home_player_pos8,home_player_pos9,home_player_pos10,home_player_pos11,
+         away_player_pos1,away_player_pos2,away_player_pos3,away_player_pos4,away_player_pos5,
+         away_player_pos6,away_player_pos7,away_player_pos8,away_player_pos9,away_player_pos10,
+         away_player_pos11)
+
+#Creating a data.frame to use for checking player attributes
+match_train <- match_filter4
+```
+
+
+## Aligning Player Attributes with Matches  
+We join the matches table with the player attributes table so that we can analyze the player attributes that contributed to Atletico wins and losses at the player level. 
+```{r }
+# Subsetting the dataframe to get required columns
+df <- c(1:42)
+match_long_SS <- match_train[, df]
+
+#Converting player id columns into rows
+match_long_SS <- match_long_SS %>% 
+  gather(Player_num, Player_id, home_player_1:away_player_11, na.rm = TRUE)
+
+#Joining with the player attribute and extracting the attribute that is closest to the match
+match_new <- match_long_SS %>%
+  left_join(select(player, player_api_id, player_fifa_api_id), 
+            by = c("Player_id" = "player_api_id")) %>%
+  left_join(select(player_attributes, -id, -player_fifa_api_id), 
+            by = c("Player_id" = "player_api_id")) %>%
+  mutate(date_diff = abs(as.Date(date.x) - as.Date(date.y))) %>%
+  group_by(match_api_id, Player_id) %>% 
+  mutate(p_rank = rank(date_diff, ties.method = "first")) %>%
+  filter(p_rank == 1)
+
+match_player <- match_new
+
+#Gathering and converting the positions of players from columns to rows
+player_pos_int <- match_train %>%
+  select(match_api_id, home_player_pos1:away_player_pos11) %>%
+  gather(Player_num, Pos, home_player_pos1:away_player_pos11)
+
+#creating an id column to join with the data frame created above
+player_pos_int$Player_num <-  str_replace(player_pos_int$Player_num, "pos", "")
+
+#Joining the player positions to the dataframe with match and player attributes
+match_player_2 <- match_player %>%
+  left_join(select(player_pos_int, match_api_id, Player_num, Pos), 
+            by = c("match_api_id" = "match_api_id", "Player_num" = "Player_num"))
+```
+
+## Discretizing Player Attributes  
+After joining the player attributes to the matches, we discretize them so that they can be used with association rule analysis. Discretizing the attributes will help in identifying the characteristic ranges that is of interest to us. The discretization process takes the following form:
+
+overall_rating_bins = bin_data(overall_rating , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit")
+
+In this example the overall rating attribute of a player is binned. The values range 0 to 100 and are bucketed by 10 after the first bucket that covers the range 0 to 40. This first range represents sub average characteristics. Players are evaluated on a variety of attributes, these attributes range 0 to 100 with 100 being perfect [(FIFA ratings)](http://www.fifplay.com/encyclopedia/player-attributes/).  
+
+```{r include=FALSE}
+# Converting the continuous range of player attributes to bins as defined by FIFA
+match_player_2 <- data.frame(match_player_2)
+
+match_player_bins <- match_player_2 %>%
+  mutate(
+    overall_rating_bins = bin_data(overall_rating , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    potential_bins =bin_data(potential , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    crossing_bins =bin_data(crossing , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    finishing_bins =bin_data(finishing , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    heading_accuracy_bins =bin_data(heading_accuracy , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    short_passing_bins =bin_data(short_passing , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    volleys_bins =bin_data(volleys , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    dribbling_bins =bin_data(dribbling , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    curve_bins =bin_data(curve , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    free_kick_accuracy_bins =bin_data(free_kick_accuracy , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    long_passing_bins =bin_data(long_passing , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    ball_control_bins =bin_data(ball_control , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    acceleration_bins =bin_data(acceleration , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    sprint_speed_bins =bin_data(sprint_speed , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    agility_bins =bin_data(agility , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    reactions_bins =bin_data(reactions , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    balance_bins =bin_data(balance , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    shot_power_bins =bin_data(shot_power , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    jumping_bins =bin_data(jumping , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    stamina_bins =bin_data(stamina , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    strength_bins =bin_data(strength , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    long_shots_bins =bin_data(long_shots , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    aggression_bins =bin_data(aggression , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    interceptions_bins =bin_data(interceptions , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    positioning_bins =bin_data(positioning , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    vision_bins =bin_data(vision , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    penalties_bins =bin_data(penalties , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    marking_bins =bin_data(marking , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    standing_tackle_bins =bin_data(standing_tackle , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    sliding_tackle_bins =bin_data(sliding_tackle , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    gk_diving_bins =bin_data(gk_diving , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    gk_handling_bins =bin_data(gk_handling , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    gk_kicking_bins =bin_data(gk_kicking , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    gk_positioning_bins =bin_data(gk_positioning , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit"),
+    gk_reflexes_bins =bin_data(gk_reflexes , bins=c(0, 40, 50, 60, 70, 80, 90, 100), binType = "explicit") 
+  ) %>%
+  mutate(side = substr(Player_num, 0, 4) )
+```
+
+### Factoring the Player/Match Level Data for Use in Association Rules  
+```{r }
+# Changing the data type of all columns to factors 
+match_player_bins <- match_player_bins %>%
+  mutate_all(as.factor)
+```
+
+```{r include=FALSE}
+# Shawn's code (excluded from knit because it is duplicative)
+# Identifying positions on field with respect to Y positions : Y =1 :G, 1<Y<5 : D, 5=<Y<8 : M, Y >= 9 : A
+
+# Position for home_player_1
+match_filter_st <- match %>% mutate (home_player_pos_1 = ifelse(home_player_Y1 == 1,'G',
+                                                           ifelse(home_player_Y1 > 1 & home_player_Y1 < 5,'D',
+                                                           ifelse(home_player_Y1 >= 5 & home_player_Y1 < 9,'M','A'))))
+# Position for home_player_2
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_2 = ifelse(home_player_Y2 == 1,'G',
+                                                           ifelse(home_player_Y2 > 1 & home_player_Y2 < 5,'D',
+                                                           ifelse(home_player_Y2 >= 5 & home_player_Y2 < 9,'M','A'))))
+
+# Position for home_player_3
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_3 = ifelse(home_player_Y3 == 1,'G',
+                                                                     ifelse(home_player_Y3 > 1 & home_player_Y3 < 5,'D',
+                                                                            ifelse(home_player_Y3 >= 5 & home_player_Y3 < 9,'M','A'))))
+# Position for home_player_4
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_4 = ifelse(home_player_Y4 == 1,'G',
+                                                                     ifelse(home_player_Y4 > 1 & home_player_Y4 < 5,'D',
+                                                                            ifelse(home_player_Y4 >= 5 & home_player_Y4 < 9,'M','A'))))
+
+# Position for home_player_5
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_5 = ifelse(home_player_Y5 == 1,'G',
+                                                                     ifelse(home_player_Y5 > 1 & home_player_Y5 < 5,'D',
+                                                                            ifelse(home_player_Y5 >= 5 & home_player_Y5 < 9,'M','A'))))
+# Position for home_player_6
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_6 = ifelse(home_player_Y6 == 1,'G',
+                                                                     ifelse(home_player_Y6 > 1 & home_player_Y6 < 5,'D',
+                                                                            ifelse(home_player_Y6 >= 5 & home_player_Y6 < 9,'M','A'))))
+
+# Position for home_player_7
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_7 = ifelse(home_player_Y7 == 1,'G',
+                                                                     ifelse(home_player_Y7 > 1 & home_player_Y7 < 5,'D',
+                                                                            ifelse(home_player_Y7 >= 5 & home_player_Y7 < 9,'M','A'))))
+# Position for home_player_8
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_8 = ifelse(home_player_Y8 == 1,'G',
+                                                                     ifelse(home_player_Y8 > 1 & home_player_Y8 < 5,'D',
+                                                                            ifelse(home_player_Y8 >= 5 & home_player_Y8 < 9,'M','A'))))
+
+# Position for home_player_9
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_9 = ifelse(home_player_Y9 == 1,'G',
+                                                                     ifelse(home_player_Y9 > 1 & home_player_Y9 < 5,'D',
+                                                                            ifelse(home_player_Y9 >= 5 & home_player_Y9 < 9,'M','A'))))
+# Position for home_player_10
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_10 = ifelse(home_player_Y10 == 1,'G',
+                                                                     ifelse(home_player_Y10 > 1 & home_player_Y10 < 5,'D',
+                                                                            ifelse(home_player_Y10 >= 5 & home_player_Y10 < 9,'M','A'))))
+
+# Position for home_player_11
+match_filter_st <- match_filter_st %>% mutate (home_player_pos_11 = ifelse(home_player_Y11 == 1,'G',
+                                                                      ifelse(home_player_Y11 > 1 & home_player_Y11 < 5,'D',
+                                                                             ifelse(home_player_Y11 >= 5 & home_player_Y11 < 9,'M','A'))))
+```
+
+## Linking Player Attributes to Matches and Filtering by Years  
+We link player attributes to matches again, but this time we keep the values continuous so that we can apply more advanced visualizations and find trends that could be of interest.  
+
+```{r }
+#Convert Match table from wide to long
+keep <- c(1:9, 56:66, 116:126)
+
+match_long <- match_filter_st[, keep] %>% 
+  gather(player_num, player_api_id, home_player_1:home_player_11, na.rm = TRUE) %>% 
+  gather(home_away, team_id, home_team_api_id:away_team_api_id, na.rm = TRUE) %>%
+  gather(pos_num, pos, home_player_pos_1:home_player_pos_11, na.rm=TRUE) %>%
+  filter(str_detect(player_num, "home_player")) %>%
+  filter(home_away == "home_team_api_id")
+
+# Function to take last two characters from position and player column to match position and player
+
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+
+match_long$pos_num_act <-  substrRight(match_long$pos_num, 2)
+match_long$player_num_act <-  substrRight(match_long$player_num, 2)
+
+# Only include rows where player number on field (e.g., 11) matches position (e.g., 11). 
+# Removes inaccurate rows (e.g., don't care about position 11 for player 5) 
+# from converting table from wide to long
+
+match_long <- match_long %>%
+  filter(pos_num_act == player_num_act)
+
+# Add year column from date of match
+match_long$year <- year(match_long$date)
+
+#Join Player_name, Birthday, height and weight to player_attributes
+player_data_st <- 
+  player_attributes %>% 
+  inner_join(select(player,-id),
+             by = c("player_fifa_api_id" = "player_fifa_api_id",
+                    "player_api_id"="player_api_id"))
+
+# Join player attribute data with match data
+player_data_new <- player_data_st %>%
+  left_join(select(match_long, -id, -country_id, -season,
+                   -stage, -date, -match_api_id, -player_num,
+                   -home_away, -pos_num, -pos_num_act, -player_num_act), 
+            by = c("player_api_id" = "player_api_id")) %>% distinct()
+
+# Add year from date - this is the year in which the player attribute is loaded
+player_data_new$year_player <- year(player_data_new$date)
+
+# Add the age of the player as of 2016
+player_data_new$age <- (as.numeric(as.Date("2016-09-30") - as.Date(player_data_new$birthday)))/365
+```
+
+## Filter the Analysis to the Most Recent Years  
+In order to get relevant and actionable insights, we filter the graphical player match level data to the past 2 years. 
+
+```{r}
+# Only include data from the last two years (match or player attribute)
+player_data_2016 <- player_data_new %>%
+  filter((year == 2016 | year == 2015) & (year_player == 2015 | year_player == 2016)) %>%
+  filter(overall_rating <= potential)
+```
+
+## Aggregate the Data at the Player Level  
+Players appear in a different number of matches over the 2014/2015 and 2015/2016 seasons. In addition, they change teams and their statistics change over the course of a season. The following aggregation allows us to control for the time variant shocks. By aggregating at the player, position, team and league levels we smooth the volatility that is present in our data. We assume that attributes of player will not change significantly over two years.
+
+```{r }
+# Aggregate statistics for the last two years
+player_data_agg <- player_data_2016 %>%
+  group_by(player_api_id, pos, team_id, league_id, age) %>% 
+  dplyr::summarise (mean_overall_rtg = mean(overall_rating, na.rm=T),
+             mean_potential = mean(potential),
+             mean_crossing = mean(crossing), 
+             mean_finishing = mean(finishing), 
+             mean_heading_accuracy = mean(heading_accuracy),
+             mean_short_passing = mean(short_passing),
+             mean_volleys = mean(volleys),
+             mean_dribbling = mean(dribbling),
+             mean_curve = mean(curve),
+             mean_free_kick_accuracy = mean(free_kick_accuracy),
+             mean_long_passing = mean(long_passing),
+             mean_ball_control = mean(ball_control),
+             mean_acceleration = mean(acceleration),
+             mean_sprint_speed = mean(sprint_speed),
+             mean_agility = mean(agility),
+             mean_reactions = mean(reactions),
+             mean_balance = mean(balance),
+             mean_shot_power = mean(shot_power),
+             mean_jumping = mean(jumping),
+             mean_stamina = mean(stamina),
+             mean_strength = mean(strength),
+             mean_long_shots = mean(long_shots),
+             mean_aggression = mean(aggression),
+             mean_interceptions = mean(interceptions),
+             mean_vision = mean(vision),
+             mean_penalties = mean(penalties),
+             mean_marking = mean(marking),
+             mean_standing_tackle = mean(standing_tackle),
+             mean_sliding_tackle = mean(sliding_tackle),
+             mean_gk_diving = mean(gk_diving),
+             mean_gk_handling = mean(gk_handling),
+             mean_gk_kicking = mean(gk_kicking),
+             mean_gk_positioning = mean(gk_positioning),
+             mean_gk_reflexes = mean(gk_reflexes)
+             )
+
+# Cleanup
+rm(match_long, player_data_st, player_data_new, player_data_2016, match_filter_st)
+
+```
+
+## Subsetting Data for Impactful Visuals  
+Atletico Madrid's chief competitors are Barcelona and Real Madrid. Given this, we subset the data into three groups.  
+1. La Liga  
+2. Atletico  
+3. Barcelona & Real Madrid  
+
+This allows us to glean insights from how Atletico compares to the league average and to its chief rivals.  
+
+```{r}
+# La Liga only
+la_liga <- player_data_agg %>%
+  filter(league_id == 21518)
+
+ # Atletico Madrid only
+AMA <- player_data_agg %>%
+  filter(team_id == 9906)
+
+# Barcelona and Real Madrid only
+ barca_rm <- la_liga %>%
+   filter(team_id == 8634 | team_id == 8633)
+```
+
+```{r include=FALSE}
+front_office <- match_filter2 %>%
+                    select(id,country,league,season,stage,date, home_team_api_id,home_team_name, away_team_api_id,away_team_name,home_team_goal,away_team_goal,homeformation,awayformation,Outcome,home_player_1,home_player_pos1,home_player_2,home_player_pos2,home_player_3,home_player_pos3,home_player_4,home_player_pos4,home_player_5,home_player_pos5,home_player_6,home_player_pos6,home_player_7,home_player_pos7,home_player_8,home_player_pos8,home_player_9,home_player_pos9,home_player_10,home_player_pos10,home_player_11,home_player_pos11,away_player_1,away_player_pos1, away_player_2,away_player_pos2,away_player_3,away_player_pos3,away_player_4,away_player_pos4,away_player_5,away_player_pos5,away_player_6,away_player_pos6,away_player_7,away_player_pos7,away_player_8,away_player_pos8,away_player_9,away_player_pos9,away_player_10,away_player_pos10,away_player_11,away_player_pos11)
+
+front_office <- front_office %>% mutate(year = lubridate::year(ymd_hms(date)))
+
+front_office <- front_office %>% mutate(gametype = ifelse(home_team_name == long_team_name,"home","away")) 
+
+match_filter_current <- front_office %>% filter(date >= '2014-08-01')
+
+match_filter_players <- match_filter_current %>% select(home_team_name, away_team_name, Outcome, home_player_1, home_player_2, home_player_3, home_player_4, home_player_5, home_player_6, home_player_7, home_player_8, home_player_9, home_player_10, home_player_11, away_player_1, away_player_2, away_player_3, away_player_4, away_player_5, away_player_6, away_player_7, away_player_8, away_player_9, away_player_10, away_player_11)
+```
+
+```{r include=FALSE}
+match_filter_ath <- match_filter_players %>% filter(home_team_name == long_team_name)
+
+players_home <- match_filter_ath %>% select(Outcome, home_player_1, home_player_2, home_player_3, home_player_4, 
+                                            home_player_5, home_player_6, home_player_7, home_player_8, home_player_9, 
+                                            home_player_10, home_player_11) %>% 
+                                     rename(player1 = home_player_1, player2 = home_player_2, player3 = home_player_3,
+                                            player4 = home_player_4, player5 = home_player_5, player6 = home_player_6,
+                                            player7 = home_player_7, player8 = home_player_8, player9 = home_player_9,
+                                            player10 = home_player_10, player11 = home_player_11)
+
+match_filter_ath_away <- match_filter_players %>% filter(away_team_name == long_team_name)
+
+players_away <- match_filter_ath_away %>% select(Outcome, away_player_1, away_player_2, away_player_3, away_player_4, 
+                                            away_player_5, away_player_6, away_player_7, away_player_8, away_player_9, 
+                                            away_player_10, away_player_11) %>% 
+                                      rename(player1 = away_player_1, player2 = away_player_2, player3 = away_player_3,
+                                             player4 = away_player_4, player5 = away_player_5, player6 = away_player_6,
+                                             player7 = away_player_7, player8 = away_player_8, player9 = away_player_9,
+                                             player10 = away_player_10, player11 = away_player_11)
+
+player_results <- rbind(players_home, players_away)
+
+player_cols <- c('Outcome', 'player1', 'player2', 'player3', 'player4', 'player5', 'player6', 'player7', 'player8', 'player9', 'player10', 'player11')
+
+player_results[player_cols]  <- lapply(player_results[player_cols], factor)
+
+player_trans <- as(player_results, "transactions")  # create the AR rules transactions for player results
+
+current_player_data <- player_data %>% filter(date >= '2016-01-01')  # initialize the data for current year players
+
+```
+
+# Tactics  
+A team's formation and its style play an integral role in its success. At the highest level it is a team's tactics that will make or break its success. You, Diego Simeone, are well respected in this area of the game. We will provide an unbiased objective analysis of your managerial performance and several recommendations for improvements. 
+
+## La Liga and Atletico Madrid Common Formations  
+A team's formation seems simple, but it can be the difference between getting the most out of the available talent or squandering it. A good formation will play to the strengths of the talent available. The goal is always to maximize the talent on the field at one time and to amplify the complementary abilities of different players. This all begins with the formation.  
+
+*Description and Rationale for the Chosen Analysis*  
+In order to make a recommendation about Atletico's formation when fielding its side, we need to explore the historical formations used by Atletico and in La Liga as a whole in the past. This analysis will provide the foundation, from which we can build upon in going more in depth in terms of formations and its relationship with match outcomes.  
+
+*Execution and Results (including code)*  
+Players are coded from 1 to 11. 1 is assigned to the goalkeeper. Positions 2 to 4 are associated with the defense, 5 to 8 with the midfield, and 9 to 11 with the attack. We aggregated the data at the match level and bucketed the digits into bins based on how many of each number was present at the start of the match. If the formula found four values from 2 to 4, three from 5 to 8, and three from 9 to 11, then the formation would be coded as '4-3-3' for 4 defenders, 3 midfielders and 3 attackers. The analysis is conducted over the period 2008 to 2016. For the rest of the analysis, we constrained the analysis to 2011 to 2016. For graphics, we constrained the analysis to 2015 and 2016. However, we think it is important to provide the entire sample, 2008 to 2016, at the first stage of the analysis to illustrate the full picture. Thus, we assume that the more distant past has a bearing on the future.  
+
+```{r }
+atletico_match_formations <- c(match_filter4$homeformation, match_filter4$awayformation)
+team_ids <- c(match_filter4$home_team_api_id, match_filter4$away_team_api_id)
+
+
+atletico_match_formations <- data.frame(formations = atletico_match_formations, ids = team_ids)
+
+atl <- table(atletico_match_formations$formations[atletico_match_formations$ids == 9906])
+cat("Atletico Madrid Formation Frequencies (0-100% of matches)")
+(atl/sum(atl))*100
+
+liga <- table(atletico_match_formations$formations[atletico_match_formations$ids != 9906])
+cat("\n\nLa Liga Formation Frequencies (0-100% of matches - excluding Atletico)")
+(liga/sum(liga))*100
+```
+
+*Interpretation*  
+The analysis illustrated that Atletico played a '4-4-2' formation 67% of the time and a '4-5-1' formation 27% of the time. In contrast, the rest of the league, excluding Atletico, played a '4-4-2' formation 19% of the time and a '4-5-1' formation 62% of the time. These results are near opposites of each other.
+
+*Conclusions*  
+The fact that Atletico generally favors an entirely different formation from the rest of the league implies that we should dive deeper into the relationship between this formation and outcomes for Atletico. We want to see if the difference in formation is a strength to build upon or weakness to rectify.  
+
+## Association Rules with Formations  
+
+*Description and Rationale for the Chosen Analysis*  
+In order to understand which formations impact Atletico's performance we will analyze the formation types and their associations with match outcomes. The analysis will be primarily focused on performances against strong teams where Atletico won or drew and performances against weak or equal teams where Atletico lost or drew. The rationale behind this analysis is to identify formations that highlight Atletico's strengths against strong teams and weaknesses against weak teams. Furthermore, building on the previous analysis we will also try to understand the impact of Atletico's '4-4-2' formation on its match outcomes.  
+
+*Execution and Results (including code)*  
+We isolate when teams play at home or away by referencing the relevant columns. The average of bets for all platforms across matches are utilized to classify opposing teams as weak, equal, or strong. A team can be inferred to be stronger if the odds across the platforms are lower, indicating a lower probability of a Win for Atletico. An equal opponent is determined if the odds of a draw are lower than the odds for either of the teams to win. We assume that the bets across all platforms would be comparable for all teams owing to competition amongst themselves.  
+
+The analysis is conducted over the period of 2011 to 16. This was done since you were appointed on December 23, 2011. This will help us understand your tactics and playing style.  
+
+The formational analysis is broken into the following two parts:  
+1. Analysis of team formation against weak/equal teams  
+2. Analysis of team formation '4-4-2' on Atletico's outcome  
+
+**Analyses are not performed for cases where Atletico has won against Strong teams since the number of data points is too low.**  
+
+The following analysis assumes that years as distant as 2011 have a bearing on the present.  
+
+#### Filtering for years after 2010  
+
+```{r }
+#Filtering to keep only the recent years > 2010; Simeone was appointed on Dec 23, 2011  
+match_filter_SS <- match_filter4[which(match_filter4$year > 2010),]
+#Filtering information for 2009/10 season
+match_filter_SS <- match_filter_SS[which(match_filter_SS$season != '2010/2011'),]
+
+```
+
+#### 1. Analysis of team formation against Weak/Equal Teams  
+Team formations of Atletico which result in an unfavorable outcomes against weaker teams.  
+
+```{r }
+
+#1. Outcome fixed to a Weak and Equal team
+match_filter5 <- match_filter_SS[which(match_filter_SS$Opp_Type != 'Strong' &
+                                         match_filter_SS$Outcome != 'W'),]
+
+match_filter6 <- match_filter5[,c('team_formation','Outcome','gametype')]
+match_filter6$team_formation <- as.factor(match_filter6$team_formation)
+match_filter6$Outcome <- as.factor(match_filter6$Outcome)
+match_filter6$gametype <- as.factor(match_filter6$gametype)
+
+#Converting match table to a Transaction table
+Match_trans <- as(match_filter6, "transactions")
+
+
+rules <- apriori(Match_trans,parameter=list(supp = 0.001, conf=0.8), control = list (verbose=F))
+
+#pin for Outcomes
+inspect(subset(rules, subset = rhs %pin% "Outcome" ))
+
+```
+
+*Interpretation*  
+The above analysis illustrates that when Atletico plays with a '4-5-1' formation at home against a weak or equal team, once outcome of the match is a draw (D). A draw is observed with a support of 7.7%. That is, this combination appears 7.7% of the time that Atletico plays against a weak or equal team with an unfavorable outcome. The confidence is observed to be 100%. That is, this result is always observed when Atletico plays with this formation at home against a weak or equal team. A lift of almost 1.9 is also observed which indicates that combination of formations at home for a draw outcome happens 1.9 times beyond the case where it would have a random occurrence.  
+
+*Conclusions*  
+Although the confidence and lift indicate some association between a team formation of '4-5-1' and a draw, the low support highlights that the number of occurrences are too few to be considered to significantly impact Atletico's result. However, we recommend being cautious while playing this formation against weak or equal teams, since a '4-5-1' combination is defensive in nature due to shifting one more midfielder onto the field in the place of a forward. This might that fewer goals will be necessary to the match [(More on the '4-5-1' formation)](https://www.thoughtco.com/the-4-5-1-formation-3557645).  
+
+#### 2. Analysis of team formation '4-4-2' on Atletico's Outcome  
+Understanding Atletico's team formation '4-4-2' on its Outcome  
+
+```{r }
+#Outcome fixed to '4-4-2' formation
+match_filter5 <- match_filter_SS[which(match_filter_SS$team_formation == '4-4-2'),]
+
+match_filter6 <- match_filter5[,c('Outcome','gametype','Opp_Type')]
+match_filter6$Outcome <- as.factor(match_filter6$Outcome)
+match_filter6$gametype <- as.factor(match_filter6$gametype)
+match_filter6$Opp_Type <- as.factor(match_filter6$Opp_Type)
+
+#Converting match table to a Transaction table
+Match_trans <- as(match_filter6, "transactions")
+
+rules <- apriori(Match_trans,parameter=list(supp = 0.001, conf=0.8), control = list (verbose=F))
+
+#pin for Outcomes
+inspect(subset(rules, subset = rhs %pin% "Outcome" & lhs %pin% "Opp_Type"))
+```
+
+*Interpretation*  
+The above analysis illustrates that when Atletico plays with a '4-4-2' formation at home against a weak team, an outcome of the match is a win. The result is observed with a support of 38%. The confidence is observed to be 81%.That is, Atletico wins almost always when Atletico plays with a '4-4-2' formation against a weak team. A lift of almost 1.2 is also observed which indicates that combination of formations at home for a draw outcome happens 1.2 times beyond the case where it would have a random occurrence.  
+
+*Conclusions*  
+
+There is high support and confidence to indicate association between a team formation of '4-4-2' and a win against a weak side. A lift of 1.2 also indicates that the occurrence of this outcome is not by random chance, however the magnitude is not extremely large. Hence, it can be concluded that by and large the '4-4-2' formation is positively related to wins and you are likely taking the right approach. However, confirmation bias could exist here wherein Atletico is generally a strong team and so it could field virtually any reasonable formation and win. 
+
+## Analysis on Team Tactics  
+Team tactics are divided into three different parts of play during a match.  
+1. Build-up play  
+2. Chance creation  
+3. Defense  
+
+Build up play is the ability of the team to build up opportunities for creation of chances for goals which usually begins right at the defensive line of a football team. Build-up play is important to any team especially if a team follows a 'possession' based football. Once the team is near the opposition goal, the team shifts to 'chance creation' tactics to create chances for a player to score goal. Defense tactics as the name suggests are the tactics deployed by the team when the opposition has the ball and threatens score a goal. It is important to analyze all three of these tactical approaches by Atletico to understand if there is a specific flaw in its approach which might affect the match outcome [(Team Tactics)](http://timpalmerfootball.com/blog/2016/04/11/build-up-play-coaching-football/). 
+
+*Description and Rationale for the Chosen Analysis*  
+We try to understand the relationship between Atletico's playing tactics and the match outcome using association rules. Association rules will identify the tactical outset deployed against different opposition types. Specifically, we will try to understand tactics in matches against weak or equal teams that resulted in a draw or loss. This will help you plan your games tactically against such teams and ensure that Atletico does not drop unnecessary points against weaker teams.  
+
+*Execution and Results (including code)*  
+The analysis is performed by first combining the team attributes within the team attributes table and combining the different categories into three buckets.
+1. Build-up play
+2. Chance creation 
+3. Defense
+
+Data are mapped onto the match table where we can then analyze association rules for each of these matches and understand if there is a specific tactic which might lead to Atletico dropping unnecessary points.  
+
+```{r}
+# ---- 
+# Team Attributes - Grouping multiple attributes into similar kind
+#Build up Play
+team_attr_1 <- team_attributes %>% 
+  mutate(buildUpPlay = paste(paste('Speed',buildUpPlaySpeedClass,sep = '-'), 
+                             paste('Dribbling',buildUpPlayDribblingClass,sep = '-'),
+                             paste('Passing',buildUpPlayPassingClass,sep = '-'),
+                             paste('Positioning',buildUpPlayPositioningClass,sep = '-'),
+                             sep = '|'))
+
+#Chance Creation
+team_attr_1 <- team_attr_1 %>% 
+  mutate(chanceCreation = paste(paste('Passing',chanceCreationPassingClass,sep = '-'),
+                                paste('Crossing',chanceCreationCrossingClass,sep = '-'),
+                                paste('Shooting',chanceCreationShootingClass,sep = '-'),
+                                paste('Positioning',chanceCreationPositioningClass,sep = '-'),
+                                sep = '|'))
+#Defense
+team_attr_1 <- team_attr_1 %>% 
+  mutate(defence = paste(paste('Pressure',defencePressureClass,sep = '-'),
+                         paste('Aggression',defenceAggressionClass,sep = '-'),
+                         paste('TeamWidth',defenceTeamWidthClass,sep = '-'),
+                         paste('DefenderLine',defenceDefenderLineClass,sep = '-'),
+                         sep = '|'))
+
+#convert date to year
+team_attr_1 <- team_attr_1 %>% mutate(year = lubridate::year(ymd_hms(date)))
+
+
+#Column Cleanup
+team_attr_2 <- team_attr_1 %>%
+  select(id,team_api_id,year,buildUpPlay,chanceCreation,defence)
+```
+
+We employ a series of if else statements to categorize whether Atletico is home or away in each match (not shown). These statements form the basis of match_filter5 (dataframe name) which is then piped into match_filter6 below.  
+
+```{r include=FALSE}
+#Join Team Attributes to the Match dataset
+
+#For Home team
+match_teamattr1 <- match_filter_SS %>%
+  left_join(team_attr_2, by = c("home_team_api_id" = 'team_api_id','year'= 'year'))
+
+#Rename columns to home team attributes
+match_teamattr1 <- dplyr::rename(match_teamattr1,home_buildUpPlay = buildUpPlay,home_chanceCreation = chanceCreation
+                                 ,home_defence = defence)
+
+#For Away team
+match_teamattr1 <- match_teamattr1 %>%
+  left_join(team_attr_2, by = c("away_team_api_id" = 'team_api_id','year'= 'year'))
+
+#Rename columns to home team attributes
+match_teamattr1 <- dplyr::rename(match_teamattr1,away_buildUpPlay = buildUpPlay,away_chanceCreation = chanceCreation,away_defence = defence)
+
+#Atletico's Tactics
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Team_buildUpPlay = ifelse(gametype == 'Home',home_buildUpPlay,away_buildUpPlay))
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Team_chanceCreation = ifelse(gametype == 'Home',home_chanceCreation,away_chanceCreation))
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Team_defence = ifelse(gametype == 'Home',home_defence,away_defence))
+
+#Opponent's Tactics
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Opp_buildUpPlay = ifelse(gametype == 'Home',home_buildUpPlay,away_buildUpPlay))
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Opp_chanceCreation = ifelse(gametype == 'Home',home_chanceCreation,away_chanceCreation))
+
+match_teamattr1 <- match_teamattr1 %>%
+  mutate(Opp_defence = ifelse(gametype == 'Home',home_defence,away_defence))
+
+
+#Column cleanup
+match_teamattr2 <- match_teamattr1 %>%
+  select(season,home_team_name,away_team_name,Outcome,Opp_Type,gametype,Team_buildUpPlay,Team_chanceCreation,Team_defence,Opp_buildUpPlay,Opp_chanceCreation,Opp_defence)
+
+#Analyzing team formation with Opponent - Weak and Outcome = Lose/Draw
+match_filter5 <- match_teamattr2[which(match_teamattr2$Opp_Type != 'Strong' & match_teamattr2$Outcome != 'W'),]
+```
+
+```{r echo=T, results='hide'}
+match_filter6 <- match_filter5[,c('Team_buildUpPlay','Team_chanceCreation','Team_defence','Outcome')]
+match_filter6$Team_buildUpPlay <- as.factor(match_filter6$Team_buildUpPlay)
+match_filter6$Team_chanceCreation <- as.factor(match_filter6$Team_chanceCreation)
+match_filter6$Team_defence <- as.factor(match_filter6$Team_defence)
+match_filter6$Outcome <- as.factor(match_filter6$Outcome)
+
+#Converting match table to a Transaction table
+Match_trans <- as(match_filter6, "transactions")
+
+rules <- apriori(Match_trans,parameter=list(supp = 0.05, conf=0.8), control = list (verbose=F))
+rules <- sort(rules,by="support",decreasing=TRUE)
+
+#pin for Outcomes
+inspect(subset(rules,
+               subset = rhs %pin% "Outcome" & lhs %pin% "Team_buildUpPlay" &
+                 lhs %pin% "Team_defence" & lhs %pin% "Team_chanceCreation"))
+```
+
+### Output provided as PNG Due to Space Constraints
+**Figure 2: Association Rules Output**
+
+```{r echo=FALSE, fig.width=6, fig.height=1, fig.align='center'}
+img <- readPNG("C:/Users/henri/Google Drive/School/2018-2019 Carlson MSBA/2018 Exploratory Data Analytics 6410/HW 2/AR_out.png")
+grid.raster(img)
+#![AR Output](C:\Users\henri\Google Drive\School\2018-2019 Carlson MSBA\2018 Exploratory Data Analytics 6410\HW 2\AR_out.png)
+```
+
+*Interpretation*  
+The above analysis illustrates that when Atletico's build-up strategy involves fewer dribbling moments with a mixed variety of passing then creation of chances incorporates more crosses and shooting than usual and the defensive line creates pressure on opponent upon loss of possession more often than usual, Atletico's outcome from the game is a loss with 1% support, 85% confidence and 179% lift.  
+
+*Conclusions*  
+Although the confidence and lift do indicate some association between the specific team tactic and 'loss' as an outcome the low support highlights that the no. of occurrences are few and we should inspect this rule cautiously before making a claim about how it is impacting Atletico's overall result. However, you should be cautious while playing with this tactic against a Weaker team since relying on more crossing i.e. long balls over Possession based football might result in losing the ball more often [(Disadvantages of playing lots of Crosses while attacking against Weaker teams)](http://www.nessis.org/nessis13/vecer.pdf). This coupled with the fact that defenders press the opponent more often than usual might result in Open spaces for the opposition to play into and create more winning situation for themselves [(Advantages and Disadvantage of playing a High Press Football)](https://sports.stackexchange.com/questions/5156/pressing-high-in-football-aka-soccer).  
+
+# Roster Management and Player Development
+Our analysis indicates with good certainty that Atletico is employing the right formation. We do not observe the counter factual, so we cannot claim causation, but the signs point in the right direction. Additionally, we find that Atletico may be crossing too frequently against weak teams when it loses to them and thus unnecessarily ceding possession. However, we have less confidence in this regard because our support is low, below 1%. Ultimately, we find that at the highest level you are setting the team up for success.  
+
+Thus, we must next venture a little deeper and explore our performance at the player level. We want to isolate the areas where we can get better and the points of weakness where we should look to solve via the transfer market.  
+
+The infographic below, Figure 3., provides a view of Atletico's starting lineup and favored formation. This will be helpful in linking our analysis back to the players and their positions if you lose your place.
+
+**Figure 3: Atletico Lineup**
+```{r fig.width=6, fig.height=10,echo=FALSE, fig.align='center'}
+img <- readPNG("C:/Users/henri/Google Drive/School/2018-2019 Carlson MSBA/2018 Exploratory Data Analytics 6410/HW 2/lineup.png")
+grid.raster(img)
+ #![Atletico Starting Lineup](C:\Users\henri\Google Drive\School\2018-2019 Carlson MSBA\2018 Exploratory Data Analytics 6410\HW 2\lineup.png)
+```
+
+We will look at players individually by their role of play during a match which are Defenders, Forwards, Midfielders and Goalkeepers for the most part.
+
+## Defenders  
+Defenders play the most important role in the team's success. Football is a low scoring game it follows that it is incredibly important to prevent goals because as a goal will greatly affect the outcome of a game.  
+
+### Player development 
+
+### Atletico Madrid's Defenders Versus La Liga and Real Madrid & Barcelona
+Below we provide a visual summary of Atletico's positioning compared to its chief competitors and the league to illustrate where it stands in terms of its individual defender attributes.  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand how the attributes of Atletico Madrid's defenders compare to its competitors in La Liga as measured by the difference in the average ratings for Atletico Madrid  defenders (those who start a match) and the average ratings for La Liga  defenders. This analysis can demonstrate on which ratings Atletico Madrid's defenders can improve.  
+
+*Execution and Results (including code)*  
+The two figures show the average ratings for Atletico Madrid's defenders above the average for La Liga collectively and above Barcelona and Real Madrid, Atletico Madrid's main competition. On average, Atletico Madrid's defenders are better at most attributes than the La Liga average. However, compared to Barcelona and Real Madrid, Atletico Madrid is below average across more attributes.  
+
+```{r fig.width = 9, fig.asp = .5}
+index_1 <- c(5:6, 8:34)
+
+# La Liga Defenders
+la_liga_D <- la_liga %>%
+  filter(pos == "D") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Atletico defenders
+ama_D <- AMA %>%
+  filter(pos == "D") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Barca/RM defenders
+barca_rm_D <- barca_rm %>%
+  filter(pos == "D") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+# Defenders Compared to La Liga
+ama_diff_D <- merge(ama_D, la_liga_D, by.x="rating", by.y="rating")
+ama_diff_D$ama_premium <- ama_diff_D$avg_rating.x - ama_diff_D$avg_rating.y
+ama_diff_D$color <- ifelse(ama_diff_D$rating == "mean_overall_rtg",1, 0)
+
+# Defenders Compared to Barca/RM
+ama_barca_rm_D <- merge(ama_D, barca_rm_D, by.x="rating", by.y="rating")
+ama_barca_rm_D$ama_premium <- ama_barca_rm_D$avg_rating.x - ama_barca_rm_D$avg_rating.y
+ama_barca_rm_D$color <- ifelse(ama_barca_rm_D$rating == "mean_overall_rtg",1, 0)
+
+plot13 <- ggplot(ama_diff_D, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) +
+  coord_flip() +
+  labs(title="Defenders Compared to\nLa Liga Average", y="Rating difference",x="Metrics") 
+
+plot14 <- ggplot(ama_barca_rm_D, aes(reorder(rating, -ama_premium),
+                                     ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) +
+  coord_flip() +
+  labs(title="Defenders Compared to \nBarcelona/Real Madrid \nAverage",
+       y="Rating difference", x="Metrics") 
+
+grid.arrange(plot13, plot14, ncol=2)
+
+## For the most part, better than league average
+```
+
+*Interpretation*    
+While Atletico Madrid's defenders are above average for most attributes relative to the rest of La Liga, they are below average compared to Barcelona and Real Madrid. However, this analysis is not particularly informative in addressing which particular attributes are the most important for defenders. As such, the figure below shows only the attributes that are the most important for defenders [(defender attributes)](https://www.ea.com/en-gb/news/fifa-13-tips-positions-and-attributes-defending).  
+
+```{r }
+
+# Most important attributes: overall_rating,crossing,Heading_accuracy,dribbling,
+# jumping,stamina,strength,aggression,interceptions,marking,standing_tackle,sliding_tackle
+def_keep <- c(7, 9, 12, 18, 14, 25, 27, 3, 13, 17, 23, 26)
+
+def_attrib <- ama_barca_rm_D[def_keep,]
+
+ggplot(def_attrib, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) + 
+  coord_flip() +
+  labs(title="Primary Defense Attributes Compared to Barcelona and \nReal Madrid",
+       y="Rating difference",x="Metrics") 
+```
+
+*Interpretation*  
+Of the attributes of importance for defenders, Atletico Madrid's defenders are worse than Barcelona and Real Madrid at crossing, dribbling, and stamina. 
+
+*Conclusions*  
+This has implications for training and in the transfer market. We recommend focusing on crossing, dribbling, and conditioning in training to improve these skills. Otherwise, another option is to acquire defenders with superior ratings in these attributes.  
+
+### Analyzing player attributes for defenders using association rules  
+
+*Description and Rationale for the Chosen Analysis*  
+We identified that Atletico Madrid's defenders are worse than Barcelona and Real Madrid at crossing, dribbling, and stamina. Furthermore, we seek to understand and identify if Atletico's defense is as weak as the summary statistics suggest and to target why that may be through association rules. To get a clearer picture, we look at attributes of an attacker, defender and a midfielder separately and use only relevant metrics for each of them.  
+
+*Execution and Results (including code)*
+Players are mapped as defenders according to their position of play in each match. Metrics are chosen depending on their relevance to defenders. We use the apriori algorithm to identify the occurrence of certain attributes when the team is losing. Two scenarios were considered:  
+1) Player attributes in all matches lost by Atletico  
+2) Player attributes in matches Atletico lost with weak opponents.  
+
+```{r}
+# Gathering only the required columns for Defenders
+player_match_D <- match_player_bins %>%
+  filter(gametype == side) %>%
+  filter(Pos == "D") %>%
+  select(overall_rating_bins,potential_bins,crossing_bins,heading_accuracy_bins,
+         dribbling_bins,jumping_bins,stamina_bins,strength_bins, aggression_bins,
+         interceptions_bins, marking_bins,standing_tackle_bins,
+         sliding_tackle_bins, Outcome, Opp_Type)
+
+#Filtering for matches where Atletico's odds were strong but lost the match
+
+#1) Overall losses
+pl_D_o <- player_match_D %>%
+  #filter(Opp_Type == "Weak" | Opp_Type == "Equal") %>%
+  filter(Outcome == "L" | Outcome == "D") %>%
+  select(-c(Opp_Type))
+
+#creating transaction table
+Defence_trans_o <- as(pl_D_o, "transactions")
+
+#Creation of rules and inspection
+rules_att_o <- apriori(Defence_trans_o,parameter=list(supp = 0.01, conf=0.6),
+                       control = list (verbose=F))
+
+rules_att_o <- sort(rules_att_o,by="support",decreasing=TRUE)
+
+#2) Losses where the opponents were weak
+pl_D <- player_match_D %>%
+  filter(Opp_Type == "Weak" | Opp_Type == "Equal") %>%
+  filter(Outcome == "L" | Outcome == "D") %>%
+  select(-c(Opp_Type))
+
+#creating transaction table
+Defence_trans <- as(pl_D, "transactions")
+
+#Creation of rules and inspection
+rules_att <- apriori(Defence_trans,parameter=list(supp = 0.01, conf=0.6),
+                     control = list (verbose=F))
+
+rules_att <- sort(rules_att,by="support",decreasing=TRUE)
+
+inspect(subset(rules_att_o, subset = rhs %pin% "Outcome")[6])
+inspect(subset(rules_att, subset = rhs %pin% "Outcome")[7:8])
+
+```
+
+*Interpretation*  
+The analysis confirms that defenders have very poor crossing rating in the range of [50-60] in 20% of all matches they have lost or ended in draw with considerable confidence. It also demonstrates that dribbling skills of players in range of [40-50] occurs 12% of the time with almost 60% confidence. In both cases, there is no significant outcome in lift describing that it could be random co-occurrence. 
+
+*Conclusions*  
+Since defenders have poor crossing and dribbling skills especially in matches in which the odds favored Atletico, this could be a potential factor in these matches resulting in losses. Thus, we recommend improving the crossing and dribbling skills of the defenders. These association rules support the summary statistics we visualized when comparing Atletico to its chief rivals and the league as a whole. 
+
+### A Few Poor Defenders Jump Out When Viewing Atletico's Team as a Whole
+
+*Description and Rationale for the Chosen Analysis*  
+We are trying to understand the overall rating and potential rating for Atletico Madrid players to understand the current talent level on the team. Plotting potential rating with overall rating shows which players continue to improve and which will not. This builds on our previous analysis of Atletico's player attributes relative to peers because it allows us to explore Atletico's players in more depth.
+
+*Execution and Results (including code)*  
+The first figure shows the smoothed line of overall rating and potential rating for all players in La Liga by position. The second figure shows the points for each player on Atletico Madrid.  
+
+The data was filtered to only include players who appeared during 2015 or 2016. We assume that these seasons are most pertinent to Atletico's future success.  
+
+```{r}
+ggplot(AMA, aes(x=mean_overall_rtg, y= mean_potential, color=pos)) + geom_point(alpha = 1) +
+  geom_abline(intercept = 0, slope = 1) +
+  labs(title="Atletico Madrid Overall Rating and Potential Rating by Position",
+       x="Mean Overall Rating", y="Mean Potential") +
+  annotate("rect", xmin=60, xmax=70, ymin=65, ymax=84, color="red", alpha=.1)
+```
+
+*Interpretation*   
+For Atletico Madrid, we see that they have two defenders who are rated worse than the rest of the team (highlighted in the red box). One of the two players also has a very low potential rating relative to the rest of the team.
+
+*Conclusions*  
+Atletico Madrid has a few defenders who could be replaced with better players. There is one player in particular who started a match who has a very low rating and very low potential. However, we recognize that defenders generally have lower potential than other positions.  
+
+### Specific Player Relationships with Match Outcomes  
+
+*Description and Rationale for the Chosen Analysis*  
+We have used association rules and summary statistic visuals to illustrate where Atletico players are lacking on average, the next place to go is to explore the players that are associated with negative outcomes.
+
+*Execution and Results (including code)*
+We look for players that appeared at least 3 percent of the time and relationships with 70% confidence. We assume that these somewhat arbitrarily defined rules will have provide a true picture of the real-world relationship between our defenders and match outcomes.
+
+```{r }
+rules_loss <- apriori(player_trans,parameter=list(supp = 0.03, conf=0.7),
+                      appearance = list(default = "lhs", rhs="Outcome=L"),
+                      control = list (verbose=F))
+
+rules_loss <- sort(rules_loss, by = "lift")
+inspect(rules_loss)
+```
+
+*Interpretation*  
+There are only 4 players that have been in lineups associated with losses. Player 474589 (Jose Gimenez), player 41167(Filipe Luis), player 309334 (Saul Niguez), and player 177126 (Jan Oblak). Jose Gimenez was one of the youngest players on the squad during this time (21 years old at the end of the 2016 league year), and has high potential (a potential rating of 87), so we would not advise placing him on the transfer market at this time. Filipe Luis is an older player (31 years old at the end of the 2016 league year), so he may be a target to place on the transfer market. Saul Niguez was also associated with a multitude of lineups associated with wins, so he would not be a priority target to place on the transfer market. We cover Jan Oblak, the goalkeeper, in more detail in the **Goalkeepers** section.
+
+*Conclusions*  
+The players that we have isolated and are associated with losses range in age and potential. This has an important bearing because we can tolerate low performing players, assuming they will blossom into stars as they age, however, underperforming players of a certain age can only be retained for so long as their wages invariably inflate while their potentials level of. To truly go forward with our interpretations, we need to understand how potential varies by age (i.e., an aging curve).  
+
+### The Aging Curve and Performance
+
+*Description and Rationale for the Chosen Analysis*  
+We are trying to understand how potential rating varies by age and position within La Liga. It is important to understand how potential varies in order to acquire talented players and understand how much potential they have left to realize. For example, in the case of Filipe Luis above, Luis is an underperforming player and he is 31 years old, relatively old. A visualization of the aging curve according to the data will help us quantify whether players like Luis should be retained. It is also important to split defenders out from other positions because it is possible that the aging curve behaves differently at different positions. For example, attackers and mids have more skill so their aging curve may be delayed because speed does not matter as much.
+
+*Execution and Results (including code)*  
+We plotted age on the x-axis and the difference between potential rating and overall rating on the y-axis to visualize how potential rating varies by age. We plotted the difference between potential rating and overall rating rather than potential rating to account for differences in ability by player. In addition, we excluded goalies because we are only interested in position players. We broke out defenders (D) and attacking/midfielders (A/M) in the graphic because we wanted to make sure the aging curve behaved similary for both positional groups. Therefore, we plotted the smoothed line for midfielders and forwards collectively and defenders separately.  
+
+We assume that the seasons 2015 and 2016 have a bearing going forward and that we are not missing out on other information by not including prior seasons.  
+
+```{r }
+# Distribution of overall rating for Atletico
+la_liga_no_gk <- la_liga %>%
+  filter(pos != "G")
+
+la_liga_no_gk$pos <- ifelse(la_liga_no_gk$pos== "M","A/M", la_liga_no_gk$pos)
+la_liga_no_gk$pos <- ifelse(la_liga_no_gk$pos== "A","A/M", la_liga_no_gk$pos)
+  
+ggplot(la_liga_no_gk, aes(y=mean_potential - mean_overall_rtg, x= age, color=pos)) +
+  geom_point(alpha=0) + geom_smooth(alpha=1, se=FALSE) + 
+  labs(title="Performance and Potential Converge by Age 30",
+       x="Age (Years)", y="Mean Potential - Mean Overall Rating (Difference)") + 
+  coord_cartesian(ylim=c(0, 14), xlim=c(19, 38))
+```
+
+*Interpretation*  
+By age 30 a player has reached his potential as the difference between his potential and his rating is roughly zero. There is a slight difference in a player's early career by position as attacking and midfield players (A/M) have slightly higher potentials than their defensive counterparts (D) in relation to their ratings. However, the difference dissapears early on by age 23.
+
+*Conclusions*  
+This has implications for training and in the transfer market. There is more benefit to spending resources on developing midfielders and forwards when they are very young, assuming that the player profiles are homgeneous by position (i.e., no position selection bias exists where better player are funneled to certain positions). In the case of Filipe Luis, his time may have passed. He is a 31 year old defender who is related to losses in games we should not lose. Given the aging curve he has likely realized all of his potential. This is in contrast to Gimenez who is also related to losses but has a much greater upside given he is 21 years old and has not reached his full potential.  
+
+### Potential Replacements on Defense  
+
+*Description and Rationale for the Chosen Analysis*  
+We understand that it is not our goal to identify specific players for purchase on the transfer market. However, we felt that identifying a shortlist with the attributes we know are important could be useful to the clubs' scouts. We leave the final decision to them.  
+
+*Execution and Results (including code)*  
+The following analysis finds players that have sufficient levels of the attributes that we have identified Atletico as lacking. The analysis assumes that the fact that these players do well in the attributes that we need will not be compromised if they do not do well in the attributes with which we have not used to select them.   
+
+```{r }
+prospects <- current_player_data %>% 
+  filter(birthday >= '1991-01-01', overall_rating <= 75,
+         potential >= 83, dribbling >= 68, stamina >= 68, crossing >= 68) %>% 
+  select(player_name, date, overall_rating, potential, dribbling, stamina, crossing)
+
+new_prosp <- prospects[!duplicated(prospects$player_name),]
+new_prosp$date <- NULL
+
+print(new_prosp)  # duplicates removed for brevity
+
+left_back_prospects <- prospects %>% 
+  filter(player_name == 'Andrew Robertson' | player_name == 'Arthur Masuaku' |
+           player_name == 'Federico Mattiello' | player_name == 'Rafa Soares' |
+           player_name == 'Raphael Guerreiro')
+
+left_back_prospects$date <- NULL
+
+print(left_back_prospects)
+```
+
+*Interpretation*  
+We have gathered a short-list of 5 left-back prospects that could improve on areas that our defensive currently struggles with. Player positions were gathered from [(FIFA rosters)](https://www.fifarosters.com/).
+
+*Conclusions*  
+Atletico is weak on dribbling, stamina and crossing. It employed a couple of defenders that are linked with negative outcomes. One of these defenders, Filipe Luis, has reached his potential and is not helping the team. There are several prospects listed that jump out in the data as cheap options with potential. We leave it to the scouting squad to dive further into this issue.
+
+## Forwards  
+The next stage of our analysis is to target forwards.  
+
+### Atletico Madrid's Forwards Versus La Liga and Real Madrid & Barcelona
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand how the attributes of Atletico Madrid's forwards compare to its competitors in La Liga as measured by the difference in the average ratings for Atletico Madrid forwards (those who start a match) and the average ratings for La Liga  forwards. This analysis can demonstrate the specific ratings on which Atletico Madrid's forwards can improve.  
+
+*Execution and Results (including code)*  
+The two figures show the average ratings for Atletico Madrid's forwards above the average for La Liga collectively and above Barcelona and Real Madrid, Atletico Madrid's main competition. On average, Atletico Madrid's forwards are better at most attributes than the La Liga average. However, compared to Barcelona and Real Madrid, Atletico Madrid is below average at more attributes.  
+
+```{r fig.width = 9, fig.asp = .5}
+# La Liga Forwards
+la_liga_A <- la_liga %>%
+  filter(pos == "A") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+
+## Atletico forwards
+ama_A <- AMA %>%
+  filter(pos == "A") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Barca/RM forwards
+barca_rm_A <- barca_rm %>%
+  filter(pos == "A") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+# Forwards Compared to La Liga
+ama_diff_A <- merge(ama_A, la_liga_A, by.x="rating", by.y="rating")
+ama_diff_A$ama_premium <- ama_diff_A$avg_rating.x - ama_diff_A$avg_rating.y
+ama_diff_A$color <- ifelse(ama_diff_A$rating == "mean_overall_rtg",1, 0)
+
+# Forwards Compared to Barca/RM
+ama_barca_rm_A <- merge(ama_A, barca_rm_A, by.x="rating", by.y="rating")
+ama_barca_rm_A$ama_premium <- ama_barca_rm_A$avg_rating.x - ama_barca_rm_A$avg_rating.y
+ama_barca_rm_A$color <- ifelse(ama_barca_rm_A$rating == "mean_overall_rtg",1, 0)
+
+plot17 <- ggplot(ama_diff_A, aes(reorder(rating, -ama_premium),
+                                 ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity",show.legend = F) +
+  coord_flip()+
+  labs(title="Forwards compared to \nLa Liga Average", y="Rating difference",x="Metrics")
+
+plot18 <- ggplot(ama_barca_rm_A, aes(reorder(rating, -ama_premium),
+                                     ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity",show.legend = F) + coord_flip() +
+  labs(title="Forwards compared to \nBarcelona/Real Madrid \nAverage",
+       y="Rating difference",x="Metrics")
+
+grid.arrange(plot17, plot18, ncol=2)
+```
+
+*Interpretation*  
+While Atletico Madrid's forwards are above average at almost all attributes relative to the rest of La Liga, they are below average at almost all attributes compared to Barcelona and Real Madrid. In order to understand on which to focus, the figure below shows only the attributes that are the most important for forwards [(FIFA Attacking Tips)](https://www.ea.com/en-gb/news/fifa-13-tips-positions-and-attributes-attacking).  
+
+```{r}
+## Forward attributes: overall_rating,finishing,volleys,dribbling,acceleration,sprint_speed,agility,shot_power,strength,penalties)
+ 
+fwd_keep <- c(18, 10, 29, 9, 2, 24, 4, 27, 22, 19)
+
+fwd_attrib <- ama_barca_rm_A[fwd_keep,]
+
+ggplot(fwd_attrib, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) + 
+  geom_bar(stat="identity", show.legend = F) + coord_flip() +
+  labs(title="Primary Forward Attributes Compared to Barcelona and \nReal Madrid",
+       y="Rating Difference", x="Metrics")
+```
+
+*Interpretation*    
+Of the attributes of importance for forwards, the most glaring issues for Atletico Madrid's forwards are finishing and numerous physical skills. This suggests that Atletico Madrid's forwards are not athletic enough. Strength is a positive attribute for Atletico Madrid's forwards, suggesting that Atletico Madrid's forwards are bigger but not as agile as Barcelona and Real Madrid's forwards.  
+
+*Conclusions*  
+This continues a general trend that we have noticed where Atletico's attributes are above the rest of the league but below its chief rivals. It suggests that Atletico should focus on finishing in training and seek ways to improve the athleticism of its forwards.
+
+This being said, we will use association rules to see where Atletico's greatest strengths lie in terms of its forward line.
+
+### A Note on Aging  
+Positional players across the 2015 and 2016 seasons in La Liga generally leveled off in potential by age 30. It is important to remember this finding and consider it in the context of our following findings and recommendations when considering the optimization of the attacking lineup for Atletico.
+
+#### Associaltion Rules to Highlight Forwards  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand which attacking players are resulting in wins in order to isolate the attributes and qualities that we should seek to develop or purchase via the transfer market.  
+
+*Execution and Results (including code)*  
+In order to focus the analysis, we first isolated association rules based on wins. We use a support of 11% and confidence of 80%. This assumes that these thresholds are stringent enough that our findings can be replicated in the real world. Additionally, we assume that no associations will fail to meet this threshold which may have been valid.  
+
+```{r }
+rules_win <- apriori(player_trans,parameter=list(supp = 0.11, conf=0.8),
+                     appearance = list(default = "lhs", rhs="Outcome=W"),
+                     control = list (verbose=F))
+
+rules_win <- sort(rules_win, by = "lift")
+inspect(subset(rules_win, subset = lhs %pin% "354467"))
+```
+
+*Interpretation*  
+Almost all of the lineup configurations are comprised standard starters, so Atletico Madrid has generally been setting optimal lineup configurations, although there is one player included in the results that is not a starter. The player that is associated with the highest lift in wins, 354467 (Yannick Carrasco), is not one of the team's starting players in the standard lineup configuration. This may be of importance, so we will examine further after a market basket analysis of draws and losses. For our analysis of draws and losses, support and confidence were required to be decreased, as Atletico Madrid wins a majority of their matches. 
+
+*Conclusions*  
+Yannick Carrasco is a young player that is already showing progress. It may be important to follow his trajectory and give him more starts.
+
+*Description and Rationale for the Chosen Analysis* 
+Next, we look into draws as there were not enough losses to consider for association rules. However, under our outcome matrix, a draw can be a bad result if we are playing an equal opponent at home or if we draw a worse opponent at any location (as we defined opposition quality with betting lines).  
+
+*Execution and Results (including code)*  
+We use a much lower support of 3.5% and confidence of 75% to extract insights on the players that may be holding Atletico back. Because we dropped our support so significantly we are risking trusting associations that do not occur very frequently.  
+
+```{r }
+rules_draw <- apriori(player_trans,parameter=list(supp = 0.035, conf=0.75, maxlen = 4),
+                      appearance = list(default = "lhs", rhs="Outcome=D"),
+                      control = list (verbose=F))
+
+rules_draw <- sort(rules_draw, by = "lift")
+inspect(rules_draw)
+```
+
+*Interpretation*  
+There are three players in particular that are associated with lineups that result in draws the most often. Player 177126 (Jan Oblak), player 19327 (Miranda), and player 30853 (Fernando Torres). While Jan Oblak is associated with many lineups associated with draws, he was also associated with many lineup configurations associated with wins, and is generally considered to be an elite player, so we do not think it would be in Atletico Madrid's best interests to place him on the transfer market. As the starting goalkeeper, Oblak plays most matches so he would be associated with all results. Miranda left the team after the 2016 season, so no further analysis would be needed. Fernando Torres is a standard starter, so we will examine that further.
+
+*Conclusions*  
+Fernando Torres presents an interesting question because he is a starter who previously left the club. The club's fans love him, but he does not appear to be producing at the highest level anymore. This is illustrated by the fact that starting him is linked with Atletico drawing, which is sub optimal in most scenarios. Additionally, Torres plays in one of the attacking positions and our analysis has illustrated that Carrasco might be a better choice given his attributes and age.  
+
+*Description and Rationale for the Chosen Analysis*  
+Previously, it was discovered that Atletico Madrid's forwards have primarily been lacking in acceleration, finishing, speed, and agility compared to Real Madrid and Barcelona. Before we confirm our suggestion to place Fernando Torres on the transfer market and start Yannick Carrasco, we want to ensure that Yannick Carrasco performs well in those areas by filtering player attribute data to find their most recent attributes for comparison.  
+
+*Execution and Results (including code)*  
+We provide a side by side comparison of Torres and his younger counterpart, Carrasco. We filter for the 2016 year. This assumes that their respective attributes were not significantly different in prior years and will revert to those positions rather than their current 2016 positions. For example, if Torres was a 100 in finishing in 2015 and was going through a bad spell so he dropped to a 79, but in 2017 ended up recovering his form and reverting back to 100.  
+
+```{r }
+forwards <- current_player_data %>% 
+  filter(player_name == 'Yannick Ferreira-Carrasco' | player_name == 'Fernando Torres') %>% 
+  select(player_name, date, overall_rating, potential, 
+           acceleration, finishing, sprint_speed, agility)
+
+print(forwards)
+```
+
+*Interpretation*  
+Yannick Carrasco is better than Fernando Torres in every category but finishing. 
+
+*Conclusions*  
+Overall, Atletico Madrid has had a quality standard starting lineup over the past two seasons, but there are some configurations that we suggest implementing for the 2017 league season. Because Fernando Torres has been associated with lineups in draws and not wins, we suggest immediately placing Fernando Torres on the transfer market and moving Yannick Carrasco into the starting lineup, as he is more associated with wins and is better at qualities that Atletico Madrid's forwards tend to lack. However, as Carrasco is worse than Torres at finishing, which is already a weak point for the forwards, we recommend devoting a significant amount of time in training to finishing.
+
+## Midfielders  
+Midfielders are the key cogs in a teams' success. They provide cover for the defense and link with the attack. We sought to dive into midfielders for these reasons but found mixed results.  
+
+### Atletico Madrid's Midfielders Versus La Liga and Real Madrid & Barcelona
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand how the attributes of Atletico Madrid's midfielders compare to its competitors in La Liga as measured by the difference in the average ratings for Atletico Madrid midfielders (those who start a match) and the average ratings for La Liga midfielders. This analysis can demonstrate on which ratings Atletico Madrid's midfielders can improve.  
+
+*Execution and Results (including code)*  
+The two figures show the average ratings for Atletico Madrid's midfielders above the average for La Liga collectively and above Barcelona and Real Madrid for certain attributes, Atletico Madrid's main competition. On average, Atletico Madrid's midfielders are better at most attributes than the La Liga average. However, compared to Barcelona and Real Madrid, Atletico Madrid is below average at more attributes.  
+
+```{r fig.width = 9, fig.asp = .5}
+# La Liga mids
+la_liga_M <- la_liga %>%
+  filter(pos == "M") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Atletico mids
+ama_M <- AMA %>%
+  filter(pos == "M") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Barca/RM mids
+barca_rm_M <- barca_rm %>%
+  filter(pos == "M") %>%
+  select(index_1) %>%
+  gather(rating, value, age:mean_sliding_tackle, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+# Mids compared to La Liga
+ama_diff_M <- merge(ama_M, la_liga_M, by.x="rating", by.y="rating")
+ama_diff_M$ama_premium <- ama_diff_M$avg_rating.x - ama_diff_M$avg_rating.y
+ama_diff_M$color <- ifelse(ama_diff_M$rating == "mean_overall_rtg",1, 0)
+
+# Mids compared to Barca/RM
+ama_barca_rm_M <- merge(ama_M, barca_rm_M, by.x="rating", by.y="rating")
+ama_barca_rm_M$ama_premium <- ama_barca_rm_M$avg_rating.x - ama_barca_rm_M$avg_rating.y
+ama_barca_rm_M$color <- ifelse(ama_barca_rm_M$rating == "mean_overall_rtg",1, 0)
+
+plot15 <- ggplot(ama_diff_M, aes(reorder(rating, -ama_premium),
+                                 ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) +
+  coord_flip() +
+  labs(title="Midfielders compared \nto La Liga Average", y="Rating difference",x="Metrics")
+
+plot16 <- ggplot(ama_barca_rm_M, aes(reorder(rating, -ama_premium),
+                                     ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) +
+  coord_flip() +
+  labs(title="Midfielders compared \nto Barcelona/Real Madrid \nAverage",
+       y="Rating difference",x="Metrics")
+
+grid.arrange(plot15, plot16, ncol=2)
+```
+
+*Interpretation*  
+While Atletico Madrid's midfielders are above average at almost all attributes relative to the rest of La Liga, they are below average at almost all attributes compared to Barcelona and Real Madrid. In order to understand on which to focus, the figure below shows only the attributes that are the most important for midfielders [(FIFA Attacking Tips)](https://www.ea.com/en-gb/news/fifa-13-tips-positions-and-attributes-attacking)  
+
+```{r }
+## Midfielder attributes: overall_rating,crossing,finishing,short_passing,
+## volleys,dribbling,curve,free_kick_accuracy,long_passing,ball_control,
+## acceleration,sprint_speed,agility,reactions,balance,shot_power,
+## stamina,long_shots,vision 
+
+mid_keep <- c(18, 7, 10, 21, 29, 9, 8, 11, 15, 6, 2, 24, 4, 20, 5, 22, 25, 16, 28)
+
+mid_attrib <- ama_barca_rm_M[mid_keep,]
+
+ggplot(mid_attrib, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend = F) +
+  coord_flip() +
+  labs(title="Primary Midfield Attributes Compared to Barcelona and \nReal Madrid",
+       y="Rating difference",x="Metrics")
+```
+
+*Interpretation*  
+Of the attributes of importance for midfielders, the most glaring issues for Atletico Madrid's midfielders are  volleys, long shots, crossing, and dribbling.  
+
+*Conclusions*  
+This has implications for training and in the transfer market. We recommend focusing on crossing and dribbling (this is a common theme for the entire team), and volleys in training to improve these skills. Otherwise, another option is to acquire midfielders with superior ratings in these attributes. This being said, summary statistics do not provide the same level of insight as association rules so it will be interesting to look deeper and explore this question with a more powerful analysis.
+
+### Analyzing Player Attributes for Midfielders Using Association Rules  
+
+*Description and Rationale for the Chosen Analysis*  
+We have seen how certain attributes of Atletico Madrid's midfielders have fared against Real Madrid and Barcelona. It would be informative to see what attributes of midfielders are highlighted through association rules especially during the matches where Atletico Madrid lost while the odds of winning were for them.    
+
+*Execution and Results (including code)*  
+Metrics that are relevant to midfielders are only chosen for the analysis. The Apriori algorithm is applied to the players and matches where the team has lost to see if player attributes are seen frequently. 
+
+```{r}
+# Gathering only the required columns for Defenders
+player_match_M <- match_player_bins %>%
+  filter(gametype == side) %>%
+  filter(Pos == "M") %>%
+  select(overall_rating_bins,potential_bins,crossing_bins,heading_accuracy_bins,
+         dribbling_bins,jumping_bins,stamina_bins,strength_bins, aggression_bins,
+         interceptions_bins, marking_bins,standing_tackle_bins,sliding_tackle_bins,
+         Outcome, Opp_Type)
+
+#Filtering for matches where Atletico's odds were strong but lost the match
+
+#1) Overall losses
+pl_M_o <- player_match_M %>%
+  #filter(Opp_Type == "Weak" | Opp_Type == "Equal") %>%
+  filter(Outcome == "L" | Outcome == "D") %>%
+  select(-c(Opp_Type))
+
+#creating transaction table
+Mid_trans_o <- as(pl_M_o, "transactions")
+
+#Creation of rules and inspection
+rules_att_o <- apriori(Mid_trans_o,parameter=list(supp = 0.01, conf=0.6),
+                       control = list (verbose=F))
+
+rules_att_o <- sort(rules_att_o,by="support",decreasing=TRUE)
+
+#2) Losses where the opponents were weak
+pl_M <- player_match_M %>%
+  filter(Opp_Type == "Weak" | Opp_Type == "Equal") %>%
+  filter(Outcome == "L" | Outcome == "D") %>%
+  select(-c(Opp_Type))
+
+#creating transaction table
+Mid_trans <- as(pl_M, "transactions")
+
+#Creation of rules and inspection
+rules_att <- apriori(Mid_trans,parameter=list(supp = 0.01, conf=0.6),
+                     control = list (verbose=F))
+
+rules_att <- sort(rules_att,by="support",decreasing=TRUE)
+
+inspect(subset(rules_att_o, subset = rhs %pin% "Outcome")[c(3,7),])
+inspect(subset(rules_att, subset = rhs %pin% "Outcome")[c(1,5),])
+
+```
+
+*Interpretation*  
+It is illustrated by the analysis that midfielders have their marking skills and standing tackling skills in range of [0-40] for almost 20% and 17% of all occurrences respectively. The same is reflected in matches where the odds of winning were for Atletico. Both scenarios give enough confidence for the occurrences revealing that it is an important characteristic in matches lost. In both scenarios, the lift of the rules is not significant. It could be because of the fact that there is a small number of data points. This is an interesting finding because the issues that arise here, marking and standing tackle, differ significantly from the primary attributes we thought Atletico was weak in.
+
+*Conclusions*  
+The fact that Atletico's mids have low stats in marking and standing tackle skills suggests that this could be one of the factors impacting the team's loss. We saw that crossing and dribbling skills were lacking among midfielders overall. Together with the specified information, it induces us to train the players to improve their marking, crossing and dribbling skills to be competitive against top teams. Since the lift of the rules are not high, decisions on training midfielders have to be taken cautiously. Additionally, the findings using association rules do not line up as cleanly with the summary statistic analysis as it did for forwards and defenders. For these reasons we recommend standing pat on making any changes in the midfield at the moment.
+
+## Goalkeepers
+Over our period of analysis, the 2011 season and on, Jan Oblak was the starting goalkeeper for Atletico Madrid. He does have a backup but he appeared in approximately 70% of matches.
+
+### Atletico Madrid's Goalkeeper Versus La Liga and Real Madrid & Barcelona
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand how the goalie-specific attributes of Atletico Madrid's goalies, in this analysis primarily Jan Oblak, compare to its competitors in La Liga as measured by the difference in the average ratings for Atletico Madrid goalies (those who start a match) and the average ratings for La Liga goalies. This analysis can demonstrate on which ratings Atletico Madrid's goalies can improve.
+
+*Execution and Results (including code)*  
+The two figures show the average goalie ratings for Atletico Madrid's goalies above the average for La Liga collectively and above Barcelona and Real Madrid, Atletico Madrid's main competition. On average, Atletico Madrid's goalies are better at every attribute than the La Liga average. However, compared to Barcelona and Real Madrid, Atletico Madrid is below average at diving and has below average reflexes.
+
+```{r fig.width = 10, fig.asp = .4}
+## League-wide goalies
+index <- c(6, 35: 39)
+
+## La Liga goalies
+la_liga_gk <- la_liga %>%
+  filter(pos == "G") %>%
+  select(index) %>%
+  gather(rating, value, mean_overall_rtg:mean_gk_reflexes, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+## Atletico goalies
+ama_gk <- AMA %>%
+  filter(pos == "G") %>%
+  select(index) %>%
+  gather(rating, value, mean_overall_rtg:mean_gk_reflexes, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+
+
+## Barca/RM goalies
+barca_rm_gk <- barca_rm %>%
+  filter(pos == "G") %>%
+  select(index) %>%
+  gather(rating, value, mean_overall_rtg:mean_gk_reflexes, na.rm=TRUE) %>%
+  group_by(rating) %>%
+  summarise(avg_rating = mean(value))
+
+# GK compared to La Liga
+ama_diff_gk <- merge(ama_gk, la_liga_gk, by.x="rating", by.y="rating")
+ama_diff_gk$ama_premium <- ama_diff_gk$avg_rating.x - ama_diff_gk$avg_rating.y
+ama_diff_gk$color <- ifelse(ama_diff_gk$rating == "mean_overall_rtg",1, 0)
+
+# GK compared to Barca/RM
+ama_barca_rm_gk <- merge(ama_gk, barca_rm_gk, by.x="rating", by.y="rating")
+ama_barca_rm_gk$ama_premium <- ama_barca_rm_gk$avg_rating.x - ama_barca_rm_gk$avg_rating.y
+ama_barca_rm_gk$color <- ifelse(ama_barca_rm_gk$rating == "mean_overall_rtg",1, 0)
+
+plot11 <- ggplot(ama_diff_gk, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend=F) + coord_flip() +
+  labs(title="Goalies compared to La Liga Average", y="Rating Difference", x="Metrics")
+
+plot12 <- ggplot(ama_barca_rm_gk, aes(reorder(rating, -ama_premium), ama_premium, fill=factor(color))) +
+  geom_bar(stat="identity", show.legend=F) + coord_flip() +
+  labs(title="Goalies compared to\nBarcelona & Real Madrid", y="Rating Difference", x="Metrics")
+
+grid.arrange(plot11, plot12, ncol=2)
+```
+*Interpretation*  
+Compared to Barcelona and Real Madrid, Atletico Madrid's goalies are very good at positioning, handling, and kicking. However, there is potential improvement to be had with respect to reflexes and diving.
+
+*Conclusions*  
+Given that Real Madrid and Barcelona are generally ranked higher than Atletico across player attributes, the ratings of goalkeeping metrics at Atletico are impressive. It leads us to conclude that Atletico's goalkeeping is in good hands with its starter, Jan Oblak. Additionally, we would not recommend placing Jan Oblak on the transfer market because he is recognized as an elite player [(Jan Oblak Writeup)](http://www.marca.com/en/football/spanish-football/2016/05/15/57383d36268e3e9a5e8b45bf.html).However, as with any player, he can continue to improve. Therefore, we recommend focusing on training his reflexes and diving skills to better improve these attributes.
+
+
+# What Can Atletico Take Away?  
+1. Atletico Madrid's current formation, '4-4-2' is suitable
+2. Atletico Madrid's greatest weakness versus Barcelona and Real Madrid is with its defense
+3. Atletico's weakest defensive attributes are dribbling, crossing and stamina
+4. Atletico's attack should be more agile and fast and should replace Fernando Torres, who is past his prime, with a younger, more athletic player.
+5. Players like Yannick Carrasco are young, agile, and fast. The latter two attributes are associated with wins and the former indicates that the player still has the potential to get even better.
+6. Atletico's midfield is suitable and only requires potential training in its crossing and dribbling skill areas.
+7. Jan Oblak, Atletico's starting goalkeeper is an elite player as evidenced in his ratings. We recommend he continue to focus on improving his diving and reflexes.
+
+
+# Our Recommendation  
+In the near term, we recommend replacing Fernando Torres in the rotation with Carrasco because Carrasco has better sprint speed, agility and acceleration. Most importantly, Carrasco has room to improve since he is only 23. This is a relatively simple fix because Carrasco is already on the team. If you want to get back to the top of La Liga you need to train your defenders' stamina and dribbling or go out and buy players with higher levels of those attributes. You can refer to our list of potential replacements under the defense section of this document. The team should look to move Filipe Luis out of the starting rotation if a suitable replacement is found. In terms of playing style, crossing against weaker teams is not recommended as it can result in a dangerous loss of possession. Finally, your tactics are currently paying off in terms of formation as the 4-4-2 is related to positive results.
+

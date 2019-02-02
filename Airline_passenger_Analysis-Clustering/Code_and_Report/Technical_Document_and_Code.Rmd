@@ -1,0 +1,1670 @@
+---
+title: "HW3 6410 - Clustering - Group 5"
+author: "Jordan Boonstra, Henrik Kowalkowski, Prasanna Rajendran, Shashank Singh, Shawn Tangen, Coltt Thunstrom"
+date: "October 20, 2018"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+urlcolor: blue
+---
+
+# Introduction  
+
+## Sun Country's Situation 
+Sun Country Airlines, based out of Minneapolis, was founded in 1983 as a charter carrier for holidays and operates a small fleet of carriers which serve a select roster of destinations. Having survived multiple downturns over the years, Sun Country wants to improve current operations and aim to differentiate themselves in order to remain competitive with similar companies as well as larger airlines around the United States. In recent years, Sun Country has accumulated large amounts of transactional information on their consumers.  
+
+## The Business Problem and Approach
+Sun Country wants to optimize its marketing, advertising, vacation packages and Ufly Membership program. We believe that the best way to cater to these needs is to segment Sun Country's customer base in an unsupervised manner, namely by using a clustering based approach. Understanding this basic need we structured our analysis as follows:  
+
+1. Data cleaning and shaping
++ Sun Country's data contained many anomalies, from which we tried to impute and clean where possible
++ The data was at the customer ticket level so we grouped it to the customer group, PNR, level
+2. Determining the optimal features to cluster on
++ We analyzed summary data from the ticket and PNR level data to determine the optimal features to group the PNR level data on
++ This included employing a k-means clustering solution to determine the categories of locations Sun Country flies to and from
+3. Clustering with k-prototypes
++ We clustered using k-prototypes in order to use both continuous and categorical features
++ This analysis identified 7 distinct clusters
+4. Cluster analysis with high level visualization
++ We visualized summary statistics of each cluster to determine why it was formed
+5. Deeper insight with Association Rules
++ We explored association rules within clusters to understand relationships Sun Country could capitalize on  
+
+Ultimately we find that Sun Country has a number of discrete customer segments that it can capitalize on via a two part approach. Additionally, we recommend that Sun Country institute stricter data ingestion controls in the future to limit the resources needed to prepare the data.  
+
+# Data Cleaning and Reshaping  
+
+```{r setup, include=F}
+# Save your root directory below:
+HK <-'C:/Users/henri/Documents/Large_Data_Files/HW3_6410'
+SS <- ''
+JB <- '//files.umn.edu/CSOM/Courses/Student Storage/Home/boons011/Documents/HW 3/HW 3'
+ST <- ''
+CT <- ''
+PR <- '/01 Drive/UMinn/Fall/EDA/HW3'
+cmd <- HK
+# Set your directory with your variable!
+knitr::opts_knit$set(root.dir = cmd)
+knitr::opts_chunk$set(comment = NA)
+rm(HK, SS, JB, ST, CT, PR)
+```
+
+#### Load Necessary Packages  
+```{r message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+library(ggwordcloud)
+library(data.table)
+library(stringr)
+library(clustMixType) #for kprototypes
+library(lubridate)
+library(MUCflights)
+library(cluster) # for similarity and pam
+library(arules)
+library(factoextra)
+library(png)
+library(grid)
+```
+
+```{r include=F}
+col1 <- "#23477C"
+col2 <- "#e27b3a"
+col3 <- "darkgray"
+
+myTheme <- theme_classic() + theme(axis.text = element_text(size = 10),
+                          axis.title = element_text(size = 12),
+                          title=element_text(size=14), 
+                          plot.title = element_text(hjust = 0.5),
+                          plot.subtitle = element_text(hjust = 0.5))
+```
+
+#### Initialize Normalization Function for Distance Calculations  
+```{r}
+#Creating a normalizing function
+normalize <- function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+```
+
+#### Loading the Data  
+```{r warning=FALSE, eval=F}
+sun <- fread('SunCountry.csv')
+```
+
+### Specific Cleaning Steps and Rational  
+1. We only retain rows that do not have stopovers in order to focus our analysis on the start and end portions of each PNR.
+ + We assume that Sun Country will find more value in this level of analysis.
+2. We remove rows that contain NULL birthdate Ids, we found that these rows were correlated with Age errors so it made sense to drop them completely.
+ + We assume that the birthdate ID is not, NMAR (not missing at random).
+3. We only retain rows containing Sun Country flights.
+ + We assume that flights by other operators do not impact Sun Country customers.
+4. We remove gender codes that are unknown.
+ + We assume that these errant codes were lines of bad data.
+5. We remove flight dates that started before they were booked.
+ + We assume that these observations were corrupted and should not be included in the analysis.
+6. We replace missing age values and age values above and below 100 and 0 with the median.
+ + We assume that inserting the median will allow us to retain valuable rows and this benefit is greater than the effect on the distribution of our data.
+7. We replace Elite values with standard and we replacing missing values with non member in the member status column.
+ + We assume that elite members behave similarly to standard members
+ + We assume that missing data implies non membership.  
+  
+```{r eval=F}
+# Cleaning the data prior to reshaping for analysis
+clean <- sun %>%
+        filter(StopoverCode == "") %>%
+        filter(!is.na(birthdateid)) %>%
+        filter(MarketingAirlineCode == "SY") %>%
+        filter(GenderCode != "U") %>%
+        filter(as.Date(PNRCreateDate) < as.Date(ServiceStartDate)) %>%
+        mutate(Age=replace(Age, is.na(Age) | Age > 100 | Age < 0, median(Age, na.rm=T))) %>%
+        mutate(UflyMemberStatus=ifelse(!(UflyMemberStatus %in% c("Standard", "Elite")), "non_mem", "Standard"))
+
+# Writing the clean data to disk in order to save knitting time
+#write.csv(clean, 'clean_data.csv', row.names = F)
+```
+
+#### Read in the Cleaned Data to Save Knitting Time  
+```{r}
+clean <- fread("clean_data.csv")
+```
+
+#### Read in Airport Codes to Link Real City Names
+```{r}
+# Importing airport characteristics
+data(airports) 
+```
+
+## Ticket Level Cleaned Data Analysis  
+
+*Description and Rationale for the Chosen Analysis* 
+Before an examination of data within clusters, we will first visualize some overall  characteristics of our clean data set. To perform this analysis, we will randomly sample 100,000 records. We begin our analysis by constructing a histogram of the ages of Sun Country flyers. **We will provide conclusions at the end of this high level EDA.**  
+
+*Execution and Results (including code)*  
+We sample the data to generate the histogram in a timely fashion. Thus, we assume that our sample is representative of the greater population. We are assuming that a random subset of <10% of our data will generally look like the full census of our data. The same sampled data is used for the following visuals as well and in these cases we are also assuming the underlying sample is representative.
+
+```{r}
+set.seed(0)
+cleansample <- sample_n(clean, 100000)
+```
+
+```{r}
+ggplot(cleansample, aes(x=Age)) + geom_histogram(binwidth = 2, fill = col1) +
+  labs(title="Distribution of Ticket Level Ages\n") + myTheme
+```
+
+*Interpretation*  
+There is a bi modal distribution of ages, the two most frequent age distributions of SunCountry flyers are between the ages of 25-30 and 50-60. Next, we will examine if there is a difference between the ages of Ufly members and general flyers. The data is summarized at the ticket level for this analysis.
+
+```{r}
+ggplot(cleansample, aes(x=UflyMemberStatus, y=Age)) + geom_boxplot(fill=col1) +
+  labs(title="Non Ufly Members Younger than Members\n", subtitle="Ticket Level Data") + myTheme
+```
+
+*Interpretation*  
+Overall, it seems as if Ufly members are older than general Sun Country flyers. This indicates that older SunCountry flyers could be the top targets for the Ufly rewards program. An in depth conclusion is provided at the end of this section.
+
+*Description and Rationale for the Chosen Analysis*  
+Next, we created word clouds with start and end destinations to discover which locations are the most popular with SunCountry flyers. We purposefully hid the frequencies of each location to make the visual more concise. We wanted to quickly illustrate the non Minneapolis locations that Sun Country primarily caters to.   
+
+*Execution and Results (including code)*  
+To this extent we color coded the top 5 locations for start and end differently so they would jump out further. Frequency is also mapped to the size aesthetic. Thus more frequent locations are bigger. The data used in these word clouds is the aggregated and grouped PNR level data that we use in our clustering analysis.
+
+```{r fig.width = 9, fig.asp = .5}
+word_data_st <- as.character(cleansample$ServiceStartCity)
+word_data_st <- setNames(data.frame(table(word_data_st)), c("ID","Freq"))
+word_data_st$ID <- airports$City[match(word_data_st$ID, airports$IATA)]
+word_data_st <- word_data_st %>% filter(ID != "Minneapolis")
+
+word_data_end <- as.character(cleansample$ServiceEndCity)
+word_data_end <- setNames(data.frame(table(word_data_end)), c("ID","Freq"))
+word_data_end$ID <- airports$City[match(word_data_end$ID, airports$IATA)]
+word_data_end <- word_data_end %>% filter(ID != "Minneapolis")
+
+word_data_st$Only <- ifelse(rank(-word_data_st$Freq) < 6, 1, 0)
+word_data_end$Only <- ifelse(rank(-word_data_end$Freq) < 6, 1, 0)
+
+word_data_st$Ind <- "Start Location"
+word_data_end$Ind <- "End Location"
+
+word_data <- rbind(word_data_end, word_data_st)
+
+ggplot(word_data, aes(label = ID, size = Freq, col=factor(Only))) +
+  geom_text_wordcloud()  +
+  scale_size(range = c(2,10)) +
+  facet_wrap(~Ind) + labs(title="Highest Frequency Locations\n") +
+  scale_colour_manual(values=c(col1,col2)) + myTheme
+
+rm(word_data_st, word_data_end, cleansample, clean)
+
+# https://cran.r-project.org/web/packages/ggwordcloud/vignettes/ggwordcloud.html
+```
+
+*Interpretation*  
+MSP is overwhelmingly the most popular start and end city, with 64% of all departures (exact values not pictured), which is not entirely surprising as Sun Country is a Minnesota based company. Given this ratio we have excluded it from the analysis as it would overwhelm the word cloud without providing inferential value.  
+
+The 5 most popular end locations are Fort Myers, Orlando, New York, Cancun and Las Vegas. Interestingly, there is not significant overlap with the start locations outside of New York. This helps inform us that Sun Country is primarily being used as a destination airline as there is little overlap in start and end locations and the end locations are primarily vacation locations.  
+
+*Conclusions*  
+In our highest level EDA of the cleaned, but un-aggregated data we have discovered that the distribution of Sun Country flight ages is bi-modal. This indicates that there are likely differences in ages to support clustering. We see that Ufly rewards members are generally older, this indicates an area that we should dive into further to understand. Finally, we see that Sun Country destinations and origins are largely different. This informs us that Sun Country is being used to go places but for potentially longer duration since customers are not returning to the same places. The fact that the most common end destinations are generally regarded as vacation locations is intriguing because it provides preliminary support for Sun Country's hypothesis that it is being used as a "get-away" airline. This high level EDA informs us that age and start and end location may be important features to group on. Additionally, we see that Ufly members have a specific break down in terms of age. This is something we can explore after merging the cluster labels back to the data later.
+
+### Reshaping the Data to the PNR Level for Clustering  
+
+Our data is at a very non-aggregated level. In order to analyze it with clustering analysis we grouped it at the PNR level. Thus the analysis is at the flight group level. This could be for a single traveler or for a family of travelers and any groupings in between. We select the first start city as the origin of every group and the first end city as the destination of every group. This assumes that these rows are the most important out of the available origin and destination IDs for each group. We also select the first start date as we assume this correlates most highly with the time of year the group expected to be traveling on. We determine the number of customers in each group by taking the number of distinct passenger names for each PNR, this assumes that two different passengers on a PNR have different names so we count them properly. We also extract the mean base fair amount for each group. This assumes that the mean is a good approximation for the ticket price each member of the group paid. We group seasons of travel into the following peak and non peak times based off of Sun Country's data [Sun Country Peak Seasons](https://www.suncountry.com/Explore/Our-Products/ufly-rewards-program/Earn-Redeem.html).  
+  
+**Sun Country's Peak Seasons**
+```{r echo=FALSE, fig.width=5, fig.height=2, fig.align='center'}
+img <- readPNG(paste0(cmd,"/SunCountry_PeakDates.png"))
+grid.raster(img)
+```
+
+We then group the number of customers in groups into three levels, single, double and many. We assume that these bins will help more in clustering than keeping the data continuous. Our final step is to filter out groups that have a max age < 15. We do this because Sun Country's online documentation states that minors under this cutoff must be accompanied. Thus a group with a max age < 15 is invalid [Sun Country Child Restrictions](https://www.suncountry.com/Fly/Travel-Information/Traveling-with-Kids.html).
+
+**Sun Country's Child Restrictions**
+```{r echo=FALSE, fig.width=5, fig.height=2, fig.align='center'}
+img <- readPNG(paste0(cmd,"/SunCountry_KidTravel.png"))
+grid.raster(img)
+```
+
+```{r eval=F}
+# Reshaping the data to PNR level and transforming variables accordingly
+
+PNR_level <- clean %>%
+  select(PNRLocatorID,
+         ServiceEndCity,
+         ServiceStartCity,
+         ServiceStartDate,
+         Age,
+         PaxName,
+         BaseFareAmt,
+         UflyMemberStatus) %>%
+  group_by(PNRLocatorID) %>%
+  summarise(realOrig = first(ServiceStartCity),
+            realDest = first(ServiceEndCity),
+            Startdate = first(ServiceStartDate),
+            UflyStatus = first(UflyMemberStatus),
+            maxAge = max(Age),
+            nCust = n_distinct(PaxName),
+            avgFair = mean(BaseFareAmt)) %>%
+  mutate(Startdate = ymd(Startdate)) %>%
+  mutate(month_pt = month(Startdate)) %>%
+  mutate(day_of_year = yday(Startdate)) %>%
+  mutate(Season_label = ifelse(day_of_year >= 1 & day_of_year <= 5, "Winter_break",
+                      ifelse(day_of_year >= 55  & day_of_year <= 98, "Spring_break",
+                      ifelse(day_of_year >= 182  & day_of_year <= 212, "Summer_break",
+                      ifelse(day_of_year >= 319  & day_of_year <= 365, "Winter_break","Non-peak")))),
+           group_label = ifelse(nCust == 1, "Single", ifelse(nCust == 2, "Double", "Many"))) %>%
+  select(PNRLocatorID, Startdate, month_pt, realOrig,
+         realDest, nCust, maxAge, group_label,
+         avgFair, Season_label, UflyStatus) %>%
+  filter(maxAge > 14)
+```
+
+ 
+## Categorizing Sun Country Locations with K-Means 
+
+We calculate the total number of groups at our origin and destination airports, e.g. MSP, DFW and so on. We then join this data with data from the MUC flights package [MUC flights R Package](https://cran.r-project.org/web/packages/MUCflights/MUCflights.pdf). The package contains IATA codes, DFW, MSP etc. for over 6,000 distinct airports. This package contains the city name, country and latitude and longitude for each IATA code along with many other attributes. This allows us to cluster our origin and destination cities with K-means.  
+
+We use latitude, longitude and total groups to cluster our origin and destinations into general categories. Since Sun Country views itself as a travel airline we multiply the normalized value of latitude by 2 to give it more weight in the partitioning algorithm. We want destinations in Mexico to cluster together and destinations in the Pacific Northwest to cluster together for example.  
+
+The final step is to generate an SSE curve to create an elbow plot of the location clusters. The elbow likely occurs at 2 clusters, but we see SSE generally minimized at 8 clusters so we use 8. This assumes that we are not injecting too much domain knowledge into determining the number of clusters to use in this case as a statistical solution would use 2.  
+
+```{r eval=F}
+# Calculating the count of flyers for each airport
+
+# Creating a data frame of count for each origin airport
+origin <- data.frame(table(PNR_level$realOrig))
+colnames(origin) <- c("airport", "count")
+
+# Creating a data frame of count for each dest airport
+dest <- data.frame(table(PNR_level$realDest))
+colnames(dest) <- c("airport2", "count2")
+
+# Joining origin and dest count
+cust_counts <- origin %>% full_join(select(dest, airport2, count2), by = c("airport"= 'airport2'))
+
+# replacing NA's with 0's
+cust_counts[is.na(cust_counts)] <- 0
+
+# Total of origin & destination count
+cust_counts$total <- cust_counts$count + cust_counts$count2
+
+# Selecting the necessary columns : airport_code , total groups
+cust_counts <- cust_counts %>%
+                select(airport, total)
+
+# Merge MUC database of flights with customer counts on airport IATA e.g. 'DFW, MSP...'
+sc_clust <- merge(airports, cust_counts, by.x='IATA', by.y='airport')
+
+# Filterign only for required columns for clustering
+cluster_data <- sc_clust %>% select(Latitude, Longitude, total)
+
+# Normalizing the variables and assigning weights to Latitude
+cluster_normalized <- cluster_data %>%
+  mutate(Latitude = 2 * normalize(Latitude),  # weather is very important
+         Longitude = normalize(Longitude),
+         total = normalize(total))
+
+# Determine the number of clusters based on SSE
+SSE_curve_k_means <- c()
+for (k in 1:10) {
+  kcluster <- kmeans(cluster_normalized, k)
+  sse <- sum(kcluster$withinss)
+  SSE_curve_k_means[k] <- sse
+}
+
+```
+
+#### Save the SSE Curve to Speed the Knitting of the Document  
+```{r eval=F}
+# Writing SSE details to disk to replicate the results later
+#write.csv(SSE_curve_k_means, 'SSE_curve_k_means.csv', row.names = F)
+```
+
+### Elbow Plot of the K-Means Location Solution  
+```{r}
+# Load the data in
+SSE_curve_k_means <- fread("SSE_curve_k_means.csv") 
+
+# Visualising the number of clusters
+qplot(1:10, SSE_curve_k_means$x, geom=c("point", "line"),
+      main="Elbow Plot for K-Means Sample Clustering", xlab="Number of Clusters", ylab="SSE") + 
+  scale_x_continuous(breaks = seq(0, 10, 1)) + myTheme
+rm(SSE_curve_k_means)
+```
+As you can see, the elbow occurs at K = 2 but SSE is truly minimized at K = 8.  
+
+#### K-Means for an 8 Location Solution  
+
+The following code generates 8 clusters using the k-means algorithm.  
+```{r eval=F}
+# Creating the clusters 
+k_clusts <- kmeans(cluster_normalized, 8) # Assigning 8 clusters
+```
+
+#### Save the Location Cluster Solution to Speed the Knitting of the Document  
+```{r eval=F}
+# Writing the airport cluster results to disk
+
+airport_clusters <- sc_clust %>%
+          select(City, Country, total) %>%
+          cbind(k_clusts$cluster)
+
+colnames(airport_clusters) <- c("City","Country","Total","Cluster_Label") 
+
+#write.csv(airport_clusters, 'airport_clusters.csv', row.names = F)
+```
+
+#### Read in the Saved Cluster Solution  
+```{r}
+airport_clusters <- fread("airport_clusters.csv")
+```
+
+### Location Cluster Solution Statistics  
+```{r}
+# How many in each cluster
+table(airport_clusters$Cluster_Label)
+
+# Sum of groups in each cluster
+airport_clusters %>% group_by(Cluster_Label) %>%
+            summarize(avg_custs=mean(Total))
+```
+*Interpretation*  
+The clusters generally have 5 or more cities. The largest cluster has 14 cities and the smallest cluster has 1. Even though the largest cluster, cluster 1, has 14 cities, it only has an average number of total groups across its cities. Most interestingly the cluster with the single participant, cluster 3, has the most groups coming in and going out. We will dive into the clusters in more detail below.  
+
+#### Cluster 1 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==1,]
+```
+Cluster 1 is primarily composed of cities in northern US states trending to the east and Midwest. Some of these locations have a large number of groups serviced and some are very low. The city coded as F is Fort Collins in Colorado.  
+
+#### Cluster 2 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==2,]
+```
+Cluster 2 is a Florida centric cluster, this cluster also sees a lot of groups in general. There is far less variance in the total count of groups than in cluster 1.  
+
+#### Cluster 3 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==3,]
+```
+Cluster 3 contains the most groups and this makes sense because it is entirely composed of Minneapolis, Sun Country's hub.  
+
+#### Cluster 4 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==4,]
+```
+Cluster 4 is a Texas/Southeast US cluster. Outside of Harlingen and Dallas-Fort Worth, these locations do not see a lot of groups. It appears that the algorithm, primarily partitioned on latitude here.  
+
+#### Cluster 5 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==5,]
+```
+Cluster 5 appears to be a Caribbean travel location cluster, these are Sun Country's southern locations that are non-Mexico located. There is very little variance in the group total here as well, all of these destinations see a similar number of PNRs from Sun Country.  
+
+#### Cluster 6 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==6,]
+```
+Cluster 6 looks like a Mexican holiday destination cluster. Cancun sits atop the list with the most groups traveling to and from it. The algorithm almost certainly partitioned by latitude here.  
+
+#### Cluster 7 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==7,]
+```
+Cluster 7 appears to be a Pacific Northwest cluster. We see that Sun Country frequently services Seattle and Anchorage relative to our other locations.  
+
+#### Cluster 8 Participants  
+```{r}
+airport_clusters[airport_clusters$Cluster_Label==8,]
+```
+Cluster 8 looks like a Southwest/Southern California cluster. There is little variance in the groups traveling to and from these locations outside of Bullhead City.  
+
+*Conclusions*  
+The results of the clusters partitioned by the k-means algorithm on latitude, longitude and group totals make a lot of sense. We see that there are two primary international clusters, Mexico and the Caribbean. There is a Pacific Northwest grouping and a Midwest/East Coast grouping. Having Minneapolis in its own cluster is also important because of its designation as Sun Country's hub. Grouping our current airport origins and destinations into these groupings will help us reduce the number of levels that k-prototypes needs to partition on when we use it later.  
+
+### K-Means and Domain Knowledge Cluster Solution  
+```{r}
+# Read in customized clusters
+final_air_clusts <- fread("airports_domain.csv")
+
+# We decided that Southwest was a better title than SoCal for the specific cluster
+final_air_clusts$Category[final_air_clusts$Category == 'SoCal'] <- "Southwest"
+
+# List the final clusters
+final_air_clusts[order(final_air_clusts$Category),]
+```
+
+We decided that k-means selected relevant clusters, but we felt that we could combine this objective clustering with our domain knowledge about locations inside and outside the US. We downloaded the cluster mappings in Excel and then re-uploaded our 'domain clusters'. As you can see, there was not a lot of movement, we ultimately just shuffled a couple of locations around.  
+
+The final categories after splitting east coast and Midwest locations into their own groups are as follows  
+
++ PNW (Pacific Northwest)
++ East Coast (we split this out from the k-means recommendation)
++ Mexico
++ Texas
++ Midwest (we split this out from the k-means recommendation)
++ Southwest
++ Caribbean
++ Florida
++ Minneapolis
++ Texas
+
+#### Subset the Domain Knowledge Clusters to Merge with the PNR Level Data  
+```{r eval=F}
+final_air_clusts <- final_air_clusts %>% select(AirportCode, Category)
+```
+
+#### Merge the New Location Designations with the PNR Level Data  
+
+We remap the categories for start cities and end cities to the data so the k-prototypes algorithm can more easily group by where our groups are flying to and from  
+
+```{r eval=F}
+# Joining the airport categories to PNR_level data
+PNR_level$Start_Category <-
+  final_air_clusts$Category[match(PNR_level$realOrig,final_air_clusts$AirportCode)]
+
+PNR_level$End_Category <- 
+  final_air_clusts$Category[match(PNR_level$realDest,final_air_clusts$AirportCode)]
+
+# Writing the clean data to disk in order to save knitting time
+#write.csv(PNR_level, 'PNR_level_data.csv', row.names = F)
+```
+
+#### Read in the PNR Level Data to Speed up the Knitting  
+```{r}
+# Remove extraneous vars
+rm(airport_clusters, final_air_clusts)
+
+# Load PNR data
+PNR_level <- fread("PNR_level_data.csv")
+
+# Overwrite SoCal with Southwest (it is a better name)
+PNR_level <- PNR_level %>%
+  mutate(Start_Category=replace(Start_Category, Start_Category=='SoCal', 'Southwest'),
+          End_Category=replace(End_Category, End_Category=='SoCal', 'Southwest'))
+```
+
+## PNR Level Data Analysis  
+
+*Description and Rationale for the Chosen Analysis*  
+Having gotten an understanding for the shape of the high level data and having grouped our common start and end locations, we now want to dive into our PNR level data. This is important because the PNR level data will help give us an approximation of Sun Country's customers. We cannot track customers over time but, return customers will have more weight as they will show up multiple times. We like this assumption because we feel that frequent Sun Country customers should impact our analysis more heavily. The effect of grouping at the PNR level helps us group flight packages together. We were previously at the ticket level, grouping to the PNR level informs us on how many customers traveled together and a common start and end location among other aggregate statistics. **We will provide conclusions for the following similar visuals at the end of this analysis.**  
+
+*Execution and Results (including code)*  
+We plot the maximum age of the group level observation in the PNR level data versus our custom grouping of seasonal travel times. Detail on how we generated these groupings was provided in the **Data Cleaning and Reshaping** section.  
+
+```{r}
+ggplot(PNR_level, aes(x=Season_label, y=maxAge)) + geom_boxplot(fill=col1) +
+  labs(title="No Discernable Differences Across Season\n") + myTheme
+```
+*Interpretation*  
+Overall, the ages of flyers across different seasons is fairly consistent, although the median age of flyers during the Spring Break season is slightly older than the rest. This could be a potential time to create vacation packages for older SunCountry flyers.  
+
+*Execution and Results (including code)*  
+We view the maximum age of each PNR (The ID the airline uses for the grouping of tickets) versus the group label. We assume that observations that fall into our "Many" category behave similarly to each other. This means that a group of 3 customers has similar features to a group of 4 or even 8. This is a little bit of a stretch to assume, however, we think that singles and doubles are far more different from each other group than a group of 5 is to a group of 10. Additionally, we see singles taking up the majority of grouped PNRs followed by double groups and then groups of many.  
+
+```{r}
+ggplot(PNR_level, aes(x=group_label, y=maxAge)) + geom_boxplot(fill=col1) +
+  labs(title="Single Travelers are Younger\n") + myTheme
+```
+*Interpretation*  
+Single flyers are much younger than double, and large (many) group flyers. There is almost a 20 year difference between the median age of double flyers and single flyers. With this information, there could be tailored flight packages for solo flyers to locations that are frequented by younger flyers, and vice versa for double/group flyers.  
+
+*Description and Rationale for the Chosen Analysis*  
+The final stage of our PNR level EDA overview is to understand how the categories of locations we created behave. Earlier we explored specific cities, however, we now employ the location groupings that our k-means clustering identified, see **Categorizing Sun Country Locations with K-Means**, to determine the common locations Sun Country groups travel to and from.  
+
+*Execution and Results (including code)*  
+We employ a word cloud to visualize the most common start and end location categories. The top 2 locations and destinations are highlighted. We assume that the word cloud will provide a more concise and valuable visual than numerical statistics depicting the actual ratios of travel. Minneapolis is excluded as it is generally understood as Sun Country's hub it will always feature prominently. It is very important to understand the key assumption here, we have grouped locations into categories, the categories will not have the same number of observations as each other. Thus the frequency is a function of both the popularity of the general category (e.g. people generally like to go to Mexico) and the number of distinct locations that each category contains (e.g. Cozumel, Cancun etc.). We assume that the number of distinct locations in each category is less important the general location the category encompasses.
+
+```{r}
+set.seed(0)
+cleansample <- sample_n(PNR_level, 100000)
+```
+
+```{r fig.width = 9, fig.asp = .5}
+word_data_st <- as.character(cleansample$Start_Category)
+word_data_st <- setNames(data.frame(table(word_data_st)), c("ID","Freq"))
+word_data_st <- word_data_st %>% filter(ID != "Minneapolis")
+
+word_data_end <- as.character(cleansample$End_Category)
+word_data_end <- setNames(data.frame(table(word_data_end)), c("ID","Freq"))
+word_data_end <- word_data_end %>% filter(ID != "Minneapolis")
+
+word_data_st$Only <- ifelse(rank(-word_data_st$Freq) < 3, 1, 0)
+word_data_end$Only <- ifelse(rank(-word_data_end$Freq) < 3, 1, 0)
+
+word_data_st$Ind <- "Start Location"
+word_data_end$Ind <- "End Location"
+
+word_data <- rbind(word_data_end, word_data_st)
+
+ggplot(word_data, aes(label = ID, size = Freq, col=factor(Only))) +
+  geom_text_wordcloud()  +
+  scale_size(range = c(2,20)) +
+  facet_wrap(~Ind) +
+  scale_colour_manual(values=c(col1,col2)) +
+  labs(title="Highest Frequency Location Categories\n") + myTheme
+
+# remove extraneous vars
+rm(word_data_st, word_data_end, cleansample, word_data, PNR_level)
+
+# https://cran.r-project.org/web/packages/ggwordcloud/vignettes/ggwordcloud.html
+```
+
+*Interpretation*  
+The Southwest, and the East Coast have the highest proportions of all starting and ending locations for overall flights, with each having at least a 10% proportion of all flights (for this reason their word sizes are large). These high demand locations could potentially be priority targets for partnerships.  
+
+*Conclusions*  
+Sun Country is attempting to find distinct flyer characteristics, and at the highest level of exploratory analysis, some important observations are:  
+
++ There is not a significant age difference in flyers during peak/non-peak seasons
++ Older flyers more frequently travel south, while younger flyers more frequently travel to the east coast
++ Single passenger groups generally have a lower maximum age than groups with two or more travelers.  
+
+We will keep these observations in mind as we explore the data within our clusters and create a plan of action for their business.  
+
+# K-Prototypes Clustering  
+
+## Mutate the PNR Level Data for Clustering  
+
+We normalize the data with min-max normalization and mutate our categorical variables to factors so that the prototypes algorithm can handle our data. We also select a subset of the columns to group on, maximum age, group label (single, double, many), season label (spring break, winter break, summer break, non peak) and end category (Southwest, PNW, Mexico...). We selected these columns after exploring each feature and hypothesizing why a cluster might be partitioned because of a level within each feature. We do not include start category because we feel that the information it contains is best approximated by the end category (see the word map above) and we feel that the end category information is more valuable, we do not want to overwhelm our algorithm with dimensionality.  
+
+```{r eval=F}
+# Transforming data for using k-prototypes
+proto_data <- PNR_level %>%
+  select(maxAge, group_label, Season_label, End_Category) %>%
+  mutate(maxAge=normalize(maxAge)) %>%
+  mutate(End_Category=factor(End_Category), 
+      Season_label = factor(Season_label),
+      group_label = factor(group_label))
+```
+
+#### Write the Prototypes Data to Disk for Easy Knitting  
+```{r eval=F}
+# Write to disk for hierarchical modelling
+#write.csv(proto_data, 'proto_data.csv', row.names = F)
+```
+
+#### Generate the Data for the Elbow Plot to Determine the Number of Clusters  
+We use a 100,000 observation sample of our selected, factored and normalized PNR level data in a 10 iteration loop to generate SSE values for each potential level of k in the range of 1-10. We assume that a 100,000 row sample of our 1,000,000 row data is a reasonable and representative subset with which to determine the optimal number of clusters. The clustering is implemented with the k-prototypes algorithm.  
+
+```{r eval=F}
+# Transforming to dataframe from tibble to use it for clustering
+proto_data <- data.frame(proto_data)
+
+# Creating a sample data frame for determining optimal number of clusters in loop
+set.seed(0)
+proto_samp <- proto_data[sample(nrow(proto_data),100000),]
+
+# Running to find SSE for each solution to get optimal number of cluster
+SSE_curve <- c()
+for (k in 1:10){
+  kpro <- kproto(proto_samp, k)
+  sse <- sum(kpro$withinss)
+  SSE_curve[k] <- sse
+}
+
+# Writing SSE details to disk to replicate the results later
+#write.csv(SSE_curve, 'SSE_curve_k_proto.csv', row.names = F)
+
+# Writing the sample data to disk
+#write.csv(proto_samp, 'proto_samp.csv', row.names = F)
+
+# Our number of clusters is 5
+```
+
+### Visualize the Optimal Number of Clusters  
+
+We generate a simple elbow plot of the SSE by cluster number to illustrate the optimal clustering k.  
+
+```{r}
+SSE_curve_k_proto <- fread("SSE_curve_k_proto.csv")
+
+# Visualising the SSE of the cluster solutions to find the optimal number of cluster
+qplot(1:10, SSE_curve_k_proto$x, geom=c("point", "line"),
+      main='Elbow Plot for K-Prototypes Sample Clustering', xlab="Number of Clusters", ylab="SSE") +
+  scale_x_continuous(breaks = seq(0, 10, 1)) + myTheme
+
+rm(SSE_curve_k_proto)
+```
+
+The optimal k could occur at either 4 or 7 clusters, we chose to use 7 clusters as we felt that we could then manually merge clusters later if we felt that there was significant overlap.  
+
+## Run K-Prototypes with K = 7  
+
+We run k-prototypes with the following columns to group on: maximum age, group label (single, double, many), season label (spring break, winter break, summer break, non peak) and end category (Southwest, PNW, Mexico...). This uses the same data that we used to determine the optimal number of clusters, to restate, max age has been min-max scaled and the categorical variables have been factored.  
+
+We understand that partitioning algorithms like k-prototypes have a tendency to find local rather than global maxima. In order to achieve a solution close to the global maximum for the data we loop the k-prototypes algorithm for the whole data 5 times. We assume that 5 iterations will produce a cluster solution with error that is close to the global optimum.  
+
+```{r eval=F}
+
+# Initialize dummy data frame for cluster results
+cluster_results <- data.frame(rep.int(0, nrow(proto_data)))
+cluster_errors <- data.frame(rep.int(0, 7)) # 7 = number of clusters
+
+# Running loop to find the global maxiumum cluster results
+for (i in 1:5) {
+cluster_label <- kproto(proto_data, 7)
+cluster_results <- cbind(cluster_results, cluster_label$cluster)
+cluster_errors <- cbind(cluster_errors, cluster_label$withinss)
+}
+
+# Joining the data with cluster resutls from each run
+clust_data <- cbind(PNR_level, cluster_results)
+
+# Removing dummy columns
+clust_data <- clust_data[,-13]
+cluster_errors <- cluster_errors[,-1]
+
+# Creating col names for each cluster result
+col_name <- paste(rep('cluster', 5), seq(1, 5))
+
+# Replacing names for cluster results & error results
+colnames(clust_data)[13:ncol(clust_data)] <- col_name
+colnames(cluster_errors) <- col_name
+
+# Appending te sum of errors for each cluster 
+cluster_errors <- rbind(cluster_errors, colSums(cluster_errors))
+
+# Writing data to disk to knit faster later
+#write.csv(clust_data, 'final_cluster_data.csv', row.names = F)
+#write.csv(cluster_errors, 'final_cluster_errors.csv', row.names = F)
+```
+
+We bind the 5 potential cluster solutions to the PNR level data and write it to disk for storage and loading purposes.  
+
+### 5 Iteration Cluster Solutions  
+
+We can see that the best clustering solution was cluster 3 since it has the lowest SSE. From here on out our analysis will use this clustering solution since it had the lowest within cluster variation.  
+
+```{r}
+final_cluster_errors <- fread("final_cluster_errors.csv")
+bar_data <- gather(final_cluster_errors[8,], key="cluster", value="sse")
+bar_data$min_val <- ifelse(bar_data$sse == min(bar_data$sse), 1, 0)
+
+ggplot(bar_data, aes(x=cluster, y=sse, fill=factor(bar_data$min_val))) +
+  geom_bar(stat = "identity") +
+  labs(title="Best Clustering Solution\n") + 
+  scale_fill_manual(guide=F,values=c(col1, col2)) +
+  geom_text(aes(label=round(sse,0)), size = 5, vjust=-.2, col = "black") + myTheme
+```
+
+#### Subset to the Best Clustering Solution  
+
+We subset the clustering solutions and PNR level data to only include the best clusters.  
+
+```{r}
+# Load data in
+clustered <- fread("final_cluster_data.csv")
+
+# Drop unnecessary columns
+clustered <- clustered %>% select(-c(`cluster 1`,`cluster 2`,`cluster 4`,`cluster 5`))
+
+# Overwrite SoCal with Southwest (it is a better name)
+clustered <- clustered %>%
+  mutate(Start_Category=replace(Start_Category, Start_Category=='SoCal', 'Southwest'),
+          End_Category=replace(End_Category, End_Category=='SoCal', 'Southwest'))
+
+# Show data
+head(clustered)
+
+# Remove extraneous vars
+rm(bar_data, final_cluster_errors)
+```
+
+The data now contains the columns listed above, we are using the best cluster solution as chosen by SSE. As you can see from the data, the data is at the PNR level and we have lined a cluster label to each row (column - cluster 3). This label will allow us to extract insights from our flight group level data.  
+
+# Overview of the Clusters  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand how equal or unequal our clusters are in terms of per cluster observations.
+
+*Execution and Results (including code)*  
+Using the third iteration of the k-prototypes clustering, we find ourselves with the following cluster membership totals. We use a bar plot because it helps the eye easily discern the differences between groups. Given that each cluster has a ratio of the total observations we use a percentage bar plot.
+
+```{r}
+bar_data <- clustered %>%
+  select(`cluster 3`) %>%
+  group_by(`cluster 3`) %>%
+  summarize(lbl_ct = n()) %>%
+  mutate(Percent=lbl_ct/sum(lbl_ct))
+
+names(bar_data) <- c("Cluster","Count","Percent")
+
+ggplot(bar_data, aes(x=Cluster, y=Percent)) +
+  geom_bar(stat = "identity", fill=col1, col=col2) +
+  labs(title="Total Observations by Cluster", y="Percentage of Total Customers") + 
+  scale_x_continuous(breaks = seq(1,7)) + expand_limits(y = c(0, .3)) +
+  geom_text(aes(label=paste0(c(round(Percent * 100, 2)), "%")),
+            size = 5, vjust=-.2, col = "black")  + myTheme +
+  theme(axis.line.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+*Interpretation*  
+Cluster 6 and 3 have the largest percentage of observations. This is illuminating because as we will show later, these clusters are comprised of similar customers in terms of destination, but different across other features. The rest of the clusters save cluster 7 have similar proportions of the observations in our data set, roughly 10% each. 
+
+*Conclusions*  
+The clustering generally found similarly sized customer segments. It will be interesting to see how these segments break down in terms of their features.
+
+*Description and Rationale for the Chosen Analysis*  
+After identifying the seven clusters, it is important to identify the differences between the clusters to understand the different customer profiles. We first looked at how the destination of flights varies by each cluster.  
+
+*Execution and Results (including code)*  
+The bar plots below show the distribution of flight destinations for each of the cluster that we created.  
+```{r fig.width = 9, fig.asp = .8}
+# Cerating labels for graphs 
+
+limit = 1:12
+label = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "July", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+sunC <- clustered
+rm(clustered)
+
+# Transforming the data set to create age bins (age bins are used for association rules further below)
+sun_r <- data.frame(sunC) %>% rename(cluster = cluster.3)
+sun_r <- sun_r %>%
+  mutate(binned_age = factor(ifelse(maxAge %in% 1:14, 'Child', 
+                                    ifelse(maxAge %in% 15:30, 'Young',
+                                      ifelse(maxAge %in% 31:45, 'Middle-Aged',
+                                          ifelse(maxAge %in% 46:60, 'Old','Senior'))))))
+
+# Distribution of End Destination Category
+sunC_places <- sun_r %>%
+  group_by(End_Category, cluster) %>%
+  summarise(groups_dest = length(End_Category))
+
+sunC_places_max <- sunC_places %>%
+  group_by(cluster) %>%
+  summarise(max_val = max(groups_dest))
+
+sunC_dest <- merge(sunC_places, sunC_places_max, by.x="cluster", by.y="cluster")
+sunC_dest$color <- ifelse(sunC_dest$groups_dest == sunC_dest$max_val, 1, 0)
+
+ggplot(sunC_dest, aes(End_Category, groups_dest, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + facet_wrap(~cluster, scales='free_y') + 
+  labs(title="Distribution of Flight Destinations by Cluster\n", y="Count",x="Region") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+*Interpretation*  
+With respect to flight destination, there are two main groups: segments that fly to various vacation destinations and those that fly to Minneapolis. Customers in clusters 3 and 6 fly to Minneapolis and customers in clusters 1, 2, 4, 5 and 7 flying to other destinations from Minneapolis. Based on this, Sun Country can offer promotions and create relationships that specifically target passengers flying to certain regions.  
+
+*Conclusions*  
+This analysis has several implications. First, it suggests that Sun County could create vacation packages in certain select regions or cities that cater to these passengers. This calls for further analysis within two segments and look for further attributes that  differentiate each clusters to identify.  
+
+First we look at customers flying to Minneapolis.
+
+## Customers flying to Minneapolis  
+
+*Description and Rationale for the Chosen Analysis*  
+After identifying the two segments flying from and to Minneapolis, we choose the clusters who are primarily flying to Minneapolis and look for potential differentiating factors in each of those clusters. As part of that, we first look at the age distribution of the main passenger in each clusters 3 and 6 to identify how age varies by cluster.  
+
+*Execution and Results (including code)*  
+The box plot shows the age distribution of the main passenger in each cluster by group size. These two clusters are highly differentiated in their age distribution.  
+```{r}
+sun_M <- sun_r %>% 
+  filter(cluster == c(3,6))
+
+ggplot(sun_M, aes(factor(cluster), maxAge)) + geom_boxplot(fill = col2) + 
+  labs(title="Age Distribution of Main Passenger by Cluster\n", y="Age",x="Cluster") + myTheme
+```
+*Interpretation*  
+The clusters show that age is heterogeneous across each cluster with cluster 3 consisting of older people and cluster 6 consisting of relatively younger people. This indicates that Sun Country can segment its customers who are flying to Minneapolis by age between each clusters.
+
+*Conclusions*  
+This analysis indicates that age plays a role in understanding the different Sun Country customer segments, which will impact how Sun Country serves these segments. However, there are other factors to consider in understanding its customer segments.
+
+### Group distribution
+
+*Description and Rationale for the Chosen Analysis*  
+While we plotted how group size varies within clusters 3 and 6 with age, we also identified the distribution of group size in each of those cluster. This is important to understand how group size varies by customer segment.
+
+*Execution and Results (including code)*  
+The bar plots show the distribution of group size by cluster. There is significant high number of customers who fly alone in both clusters.
+```{r fig.width = 9, fig.asp = .7}
+sunC_grp<- sun_r %>%
+  group_by(group_label,cluster) %>%
+  summarise(group = length(group_label))
+
+sunC_grp_max <- sunC_grp %>%
+  group_by(cluster) %>%
+  summarise(max_val = max(group))
+
+sunC_group <- merge(sunC_grp, sunC_grp_max, by.x="cluster", by.y="cluster")
+sunC_group$color <- ifelse(sunC_group$group == sunC_group$max_val, 1, 0)
+
+ggplot(sunC_group, aes(group_label, group, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~cluster, scales='free_y') + 
+  labs(title="Size of Group Distribution by Cluster\n", y="Count",x="Group Size") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+*Interpretation*  
+Group size is an important indicator of the purpose of traveling. For example, many people do not go on vacation alone. Therefore, this analysis suggests that clusters with people traveling alone most likely are not going on vacation. Those traveling in groups are more likely to be on vacation.  
+
+*Conclusions*  
+The analysis indicates that Sun Country could target segments where people travel in groups more often with vacation packages that cater to groups (e.g., resorts). Similarly, certain vacation packages could also be targeted to people traveling alone that cater more towards individual activities (e.g., car rental).  
+
+### Season Label  
+
+*Description and Rationale for the Chosen Analysis*  
+We saw the distribution of customers across age and group type for clusters 3 and 6. We would like to see if they are differ by the season their populations travel.  
+
+*Execution and Results (including code)*  
+We plot the count of travelers across months for each clusters.  
+```{r fig.width = 9, fig.asp = .5}
+sunC_grp<- sun_M %>%
+  group_by(month_pt,cluster) %>%
+  summarise(count_n = n())
+
+ggplot(sunC_grp, aes(x = month_pt, y = count_n, group = cluster, color = factor(cluster))) + 
+  geom_line(show.legend = F, size =2) +
+  labs(title="Cluster 3 & 6 Flights to Minneapolis by Month", y="Count",x="Month") + 
+  scale_x_continuous(breaks=limit, labels=label) + 
+  geom_point(size = 5, show.legend = T) + myTheme + 
+  scale_colour_manual("Cluster", values=c(col1, col2))
+
+```
+*Interpretation*  
+From the graphs, we see that most of the customers who fly to Minneapolis in each cluster fly during the summer. But with cluster 6, there are significantly higher number of customers who fly during the winter break than cluster 3.  
+
+*Conclusions*  
+The analysis indicates that Sun Country could classify customers between clusters 3 and 6 by the season they travel as well. We see that people in both the clusters come to Minneapolis primarily during summer and also a large number of people from cluster 6 coming during winter break. For summer flyers, we could create a Minnesota-themed travel package partnering with popular hotels like Radisson Blu, local restaurants like The Blue Door Pub, sports teams like Minnesota Twins and outdoor activities with Nice Ride Minnesota and suggest these bundles to customers from the time they start searching on the website. Additionally, to attract flyers from cluster 6 coming to Minneapolis during winter, we could partner with winter sporting activities and winter sports teams like Minnesota Timberwolves. We know that most of the flyers from cluster 6 are young. Sun Country could target these customers by giving them deals on WiFi in flights to get them into the membership program at a young age. It is an opportunity for Sun Country to create brand loyalty at a very young age and it would also create word of mouth because of the youth's digitally connected lives.
+
+## Association Rules  
+
+*Description and Rationale for the Chosen Analysis*  
+Now that we have a general idea of what were looking for, it is time to look at the association rules within clusters. For every set of rules, the support was set at .01 to flush out the extremely rare phenomenons, the confidence was set at .5 to capture how "true" the rule is, the lift was set at a minimum of two in order to ensure that chance was not the only factor affecting the associations, and the minimum length for a rule was set as three so that we capture more than seemingly obvious information (such as Minneapolis -> Mexico or Non-peak -> Minneapolis). The main thing we were looking for in the rules was the destination of each flight and what other factors are commonly seen for the characteristics of that flight. Because of this, the right-hand side of the rules was strictly made to be the landing region. The rules were then sorted by count to see the most often occurrences.
+
+### Cluster 3  
+
+*Execution and Results (including code)* 
+Flyers in cluster 3 primarily to Minneapolis. To reflect this, we have removed the constraint on the right-hand side that restricts Minneapolis from showing. In addition, lift has been lowered to 1.6 to allow for generation of more rules. We also binned age to make it interactive with association rules. The first five rules are filtered and analyzed.
+
+```{r}
+# Transforming the data set to create age bins
+sun_r <- data.frame(sunC) %>% rename(cluster = cluster.3)
+sun_r <- sun_r %>%
+  mutate(binned_age = factor(ifelse(maxAge %in% 1:14, 'Child', ifelse(maxAge %in% 15:30, 'Young',
+                                                                          ifelse(maxAge %in% 31:45, 'Middle-Aged',
+                                                                                 ifelse(maxAge %in% 46:60, 'Old',
+                                                                                        'Senior'))))))
+
+sun_F <- sun_r %>% mutate_all(as.factor) %>%
+  select(group_label, Season_label, Start_Category, End_Category, binned_age, UflyStatus, cluster, realOrig, realDest)
+
+# making ass rules via appriori algorithm on cluster 3
+rules3 <- filter(sun_F, cluster == 3)[1:5] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 1.6) %>% 
+  subset(subset = (rhs %pin% "End_Category" & lhs %pin% "Start_Category")) %>%
+  sort(by = "count")
+
+inspect(subset(rules3)[1:5])
+```
+*Interpretation*  
+As expected, Minneapolis dominates the destinations for this cluster. What we also see from these rules is that the fliers are flying alone and are frequently considered "old," which we also expected from the age distribution charts we examined above. In addition, it is interesting to see mostly the Southwest as the origination region.
+
+### Cluster 6  
+
+*Execution and Results (including code)*  
+The same constraints as the previous cluster are applied, but the lift is lowered further to 1.0. The first 5 rules are filtered and analyzed.  
+```{r}
+
+rules6 <- filter(sun_F, cluster == 6)[-c(7,9)] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 1.0) %>% 
+  subset(subset = (rhs %pin% "End_Category" & lhs %pin% "Start_Category")) %>%
+  sort(by = "support")
+
+# Inspecting only the top 5 rules
+inspect(subset(rules6)[1:5])
+```
+*Interpretation*  
+Using the rules, we can see that most of the customers are Minneapolis which was expected from the charts describing the clusters. With the rules, we see that flyers in this clusters are majorly young singles flying to Minneapolis. Majority of the flyers do not have membership as well. Also, most of the customers are flying from the Southwest and East Coast. 
+
+*Conclusions*  
+The association rules from both the clusters highlight the facts that we saw from the charts earlier and also give additional information on where they start from. To employ the recommendations we highlighted earlier, we could start with customers flying from the Southwest and East Coast to assess the impact of the initiatives.
+
+## Groups flying to vacation destinations  
+
+### Clusters 1, 2, 4, 5, and 7  
+```{r}
+# subsetting to only include clusters 1,2,4,5,7
+vacSunC <- sunC %>% filter(`cluster 3` == c(1,2,4,5,7))
+```
+
+## Flight Destinations  
+
+*Description and Rationale for the Chosen Analysis*  
+For clusters primarily flying to vacation destinations, we identified how the destination of flights varies by cluster. This is important as understanding where customer segments are flying impacts how Sun Country views each customer segment.
+
+*Execution and Results (including code)*  
+The bar plots below show the distribution of flight destinations by cluster for the nine region categories that we created. Cluster 1, where the oldest person in each group are middle-age passengers, primarily flies to Mexico. Clusters 2, 5, and 7 primarily fly to the Southwest. Cluster 4 primarily flies to Florida.  
+```{r fig.width = 9, fig.asp = .6}
+sunC_places <- vacSunC %>%
+  group_by(End_Category, `cluster 3`) %>%
+  summarise(groups_dest = length(End_Category))
+
+sunC_places_max <- sunC_places %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(groups_dest))
+
+sunC_dest <- merge(sunC_places, sunC_places_max, by.x="cluster 3", by.y="cluster 3")
+sunC_dest$color <- ifelse(sunC_dest$groups_dest == sunC_dest$max_val, 1, 0)
+
+ggplot(sunC_dest, aes(End_Category, groups_dest, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~`cluster 3`, scales='free_y') + 
+  labs(title="Distribution of Flight Destinations by Cluster\n", y="Count",x="Region") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+*Interpretation*  
+With respect to flight destination, there are three main groups: segments that fly to Mexico, Florida, and the Southwest (i.e., California, Las Vegas, and Arizona). Based on this, Sun Country can offer promotions and create relationships that specifically target passengers flying to certain cities.  
+
+*Conclusions*  
+This analysis has several implications. First, it suggests that Sun County could create vacation packages in certain select regions or cities that cater to these passengers. Therefore, we will analyze the behavior of the clusters as they vary by destination:  
+1. Mexico (Cluster 1)  
+2. Florida (Cluster 4)  
+3. The Southwest (Clusters 2, 5, and 7)  
+
+### Cluster 1 - Mexico Destination Vacation
+
+*Description and Rationale for the Chosen Analysis*  
+To further understand the flight patterns of groups flying to Mexico, we identified the seasons in which flights tend to occur. This is important to understand when to provide vacation packages to these customers. If deals are offered at the wrong time of year, they will not be as effective.  
+
+*Execution and Results (including code)*  
+The bar plots below show the distribution of flight by season of the groups that primarily fly to Mexico.  Flights to Mexico are primarily during the Spring Break period (late February to early April).  
+```{r fig.width = 9, fig.asp = .5}
+# filtering to cluster 1
+vacSunC1 <- sunC %>% filter(`cluster 3` == 1)
+
+sunC_season <- vacSunC1 %>%
+  group_by(Season_label, `cluster 3`) %>%
+  summarise(season = length(Season_label))
+
+sunC_season_max <- sunC_season %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(season))
+
+sunC_ssn <- merge(sunC_season, sunC_season_max, by.x="cluster 3", by.y="cluster 3")
+sunC_ssn$color <- ifelse(sunC_ssn$season == sunC_ssn$max_val, 1, 0)
+
+ggplot(sunC_ssn, aes(Season_label, season, fill=factor(color))) + geom_bar(stat="identity",show.legend = F) +
+ labs(title="Flight Seasonality Distribution for Cluster 1", y="Count",x="Season") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme
+```
+*Interpretation*  
+Since these flights primarily tend to occur during the Spring Break period, groups are most likely flying to go to Mexican resorts, especially given the location of the airports that Sun Country flies into in Mexico.  
+
+*Conclusions*  
+The analysis indicates it would be worthwhile to create relationships with resorts in Mexico. However, to better understand these groups and which resorts (e.g., family-based, young people, etc.), it would be helpful to understand how group size and age varies for passengers flying to Mexico.  
+
+### Group Size for Mexico (doubles and groups)  
+
+*Description and Rationale for the Chosen Analysis* 
+We identified the group size of groups flying to Mexico and and the age distribution of the oldest passenger in each group. This is important to understand the demographic profile of these customers.  
+
+*Execution and Results (including code)*  
+Of groups flying to Mexico, most of the groups consist of two people. In addition, there are a significant amount of groups of more than two people relative to the overall distribution of group size. With respect to age, the age of the oldest passenger is around middle-age.  
+```{r fig.width = 9, fig.asp = .5}
+sunC_grp<- vacSunC1 %>%
+  group_by(group_label, `cluster 3`) %>%
+  summarise(group = length(group_label))
+
+sunC_grp_max <- sunC_grp %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(group))
+
+sunC_group <- merge(sunC_grp, sunC_grp_max, by.x="cluster 3", by.y="cluster 3")
+sunC_group$color <- ifelse(sunC_group$group == sunC_group$max_val, 1, 0)
+
+plot1 <- ggplot(sunC_group, aes(group_label, group, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+labs(title="Size of Group Distribution", subtitle="Cluster 1", y="Count",x="Group Size") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme
+
+plot2 <- ggplot(vacSunC1, aes(factor(`cluster 3`), maxAge)) + geom_boxplot(fill = col2) + 
+  labs(title="Age Distribution of Main Passenger", subtitle="Cluster 1", y="Age",x=NULL) + 
+  myTheme + theme(axis.text.x=element_blank())
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+*Interpretation*  
+This analysis indicates that these customers are primarily flying to Mexico in groups (i.e., not alone) and are generally middle-age. While we did not capture the age of each passenger in each group, the analysis generally indicates that these groups contain younger people. This suggests that families and couples primarily fly to Mexico on Sun Country.  
+
+*Conclusions* 
+Since we have identified that families and couples primarily fly to Mexico on Sun Country within this cluster, Sun Country could create connections with family resorts that fit the profile of these customers. This includes providing vacation packages with family resorts to ease the logistical burden of booking a vacation to improve the customer experience. 
+
+## Cluster 4 - Florida Get Away  
+
+### Looking at flying season (non-peak)  
+
+*Description and Rationale for the Chosen Analysis*  
+In addition to the groups primarily flying to Mexico, we also identified a group that primarily flies to Florida. Within this cluster, we identified the distribution of flights by season. This is important to understand when to provide vacation packages to these customers. If deals are offered at the wrong time of year, they will not be as effective.  
+
+*Execution and Results (including code)*  
+We subset the cluster results to only include observations from cluster 4. We know that this cluster primarily travels to Florida. We calculate the frequencies of travel by Season.  
+```{r fig.width = 6, fig.asp = .6}
+# filtering to cluster 4
+vacSunC4 <- sunC %>% filter(`cluster 3` == 4)
+
+sunC_season <- vacSunC4 %>%
+  group_by(Season_label, `cluster 3`) %>%
+  summarise(season = length(Season_label))
+
+sunC_season_max <- sunC_season %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(season))
+
+sunC_ssn <- merge(sunC_season, sunC_season_max, by.x="cluster 3", by.y="cluster 3")
+sunC_ssn$color <- ifelse(sunC_ssn$season == sunC_ssn$max_val, 1, 0)
+
+ggplot(sunC_ssn, aes(Season_label, season, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  labs(title="Flight Seasonality Distribution for Cluster 4\n", y="Count",x="Season") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme
+```
+
+*Interpretation*  
+We identified the distribution of flights to Florida by season to understand the seasonal pattern of groups flying to Florida. We see that flyers in cluster 4 are not vacationers in the traditional sense as they do not go to Florida during peak seasons. This is illuminating because this group does not behave as we would necessarily expect. We will dive into this further in the next graphic to get a sense for how these customers behave at the month level.  
+
+*Execution and Results (including code)*  
+We use a a line plot to illustrate the flow of cluster 4 customers over the calendar year. The line chart is well suited to time series visualizations and is especially useful in this case. One major assumption of the line plot is that the periods between each data point behave linearly. Given we have our observations at the month level, we are employing a synthetic smoothing effect that must be noted.  
+```{r}
+# Flights by month - Florida
+sunC_dist_4 <- vacSunC4 %>%
+  filter(End_Category == "Florida") %>%
+  group_by(month_pt) %>%
+  summarise(count_dest = length(realDest))
+
+ggplot(sunC_dist_4, aes(month_pt, count_dest)) + 
+  geom_line(color = col2, size=1.5, show.legend = F) + 
+  labs(title="Cluster 4 Flights to Florida by Month", y="Count",x="Month") + 
+  scale_x_continuous(breaks=limit, labels=label) + 
+  geom_point(color = col1, size=3, show.legend = F) + myTheme
+```
+*Interpretation*  
+It is likely that this cluster flies to Florida during February (and January, March, and December to a lesser extent) due to the cold weather in Minnesota and the warm weather in Florida. 
+
+*Conclusions*  
+There are various amenities that Florida offers during the winter that groups can enjoy. Since customers primarily fly into Orlando and Fort Myers, we recommend establishing relationships with local attractions in those areas in addition to hotels and resorts. For example, Sun Country could offer discounted entry to Disney World or Sea World with the purchase of a Sun Country ticket. 
+
+### Flights by month - Fort Myers  
+
+*Description and Rationale for the Chosen Analysis*  
+Within the groups flying to Florida, one airport that Sun Country flies into is the Fort Myers airport. We identified the seasonal distribution of flights to Fort Myers by month to understand if it differs from the seasonal pattern of groups flying into Florida in general.  
+
+*Execution and Results (including code)*  
+Groups flying to Fort Myers exhibit the same seasonal distribution compared to groups flying to Florida in total. However, there is one major difference. Flights to Fort Myers tend to drop off less from February to March than flights to all airports in Florida.  
+```{r fig.width = 9, fig.asp = .5}
+dest_4_dist <- vacSunC4 %>%
+  filter(End_Category == "Florida") %>%
+  filter(realDest == "RSW") %>%
+  group_by(month_pt) %>%
+  summarise(count_dest = length(realDest))
+
+sunC_dist_4$Destination <- "Florida"
+dest_4_dist$Destination <- "Fort Myers"
+plot_data <- rbind(sunC_dist_4, dest_4_dist)
+
+ggplot(plot_data, aes(x=month_pt, y=count_dest, group=Destination)) + 
+  geom_point(aes(col = Destination)) + geom_line(aes(col = Destination)) + 
+  scale_x_continuous(breaks = seq(1,12,1), labels=label) + 
+  labs(title="Cluster 4 Flights to Florida and Fort Myers Airport by Month", y="Count",x="Month") + 
+  scale_color_manual(values = c(col1,col2)) + myTheme
+```
+*Interpretation*  
+The continued activity of groups flying to Fort Myers in March may be attributed to the fact that the Minnesota Twins conduct Spring Training in Fort Myers during the month of March.  
+
+*Conclusions*  
+Given that Sun Country is based in Minnesota and that these passengers leave from Minneapolis, it is also possible that these passengers flying in March attend Spring Training or may be interested in attending Spring Training. Therefore, we recommend creating a relationship with the Minnesota Twins that offers these groups discounted tickets to Twins Spring Training games. Sun Country could also offer shuttles to and from games with the shuttle leaving from Times Square, a popular attraction in Fort Myers. Times Square is a massive outdoor mall with gift shops, restaurants, and bars located on Fort Myers Beach. It is about a half hour away from the Spring Training complex, so providing a shuttle would save people time and money.  
+
+### Group Size for Florida (doubles and groups)  
+
+*Description and Rationale for the Chosen Analysis*  
+With respect to all flights to Florida, we identified the group size of groups flying to Florida and and the age distribution of the oldest passenger in each group. This is important to understand the demographic profile of these customers.  
+
+*Execution and Results (including code)*  
+Of groups flying to Florida, most of the groups consist of two people. In addition, there are a significant amount of groups of more than two people relative to the overall distribution of group size. With respect to age, the age of the oldest passenger is around middle-age (i.e., 45 to 55).  
+```{r fig.width = 9, fig.asp = .5}
+sunC_grp<- vacSunC4 %>%
+  group_by(group_label, `cluster 3`) %>%
+  summarise(group = length(group_label))
+
+sunC_grp_max <- sunC_grp %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(group))
+
+sunC_group <- merge(sunC_grp, sunC_grp_max, by.x="cluster 3", by.y="cluster 3")
+sunC_group$color <- ifelse(sunC_group$group == sunC_group$max_val, 1, 0)
+
+plot1 = ggplot(sunC_group, aes(group_label, group, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  labs(title="Size of Group Distribution",
+       subtitle="Cluster 4", y="Count",x="Group Size") + 
+  scale_fill_manual(guide=F, values=c(col1, col2)) + myTheme
+
+plot2 = ggplot(vacSunC4, aes(factor(`cluster 3`), maxAge)) + geom_boxplot(fill = col2) + 
+  labs(title="Age Distribution of Main Passenger",
+       subtitle="Cluster 4", y="Age",x=NULL) + 
+  myTheme + theme(axis.text.x=element_blank())
+
+grid.arrange(plot1, plot2, ncol=2)
+```
+*Interpretation*  
+This analysis indicates that these customers are primarily flying to Florida in groups (i.e., not alone) and are generally middle-age. While we did not capture the age of each passenger in each group, the analysis generally indicates that these groups contain younger people. This suggests that families and couples primarily fly to Florida on Sun Country.  
+
+*Conclusions*  
+Since we have identified that families and couples primarily fly to Florida on Sun Country within this cluster, Sun Country could create connections with family resorts, hotels, and attractions (e.g., Disney World, Sea World) that fit the profile of these customers. This includes providing vacation packages with family resorts, hotels, and attractions to ease the logistical burden of booking a vacation to improve the customer experience. 
+
+## Clusters 2, 5 and 7 - Southwestern US Trips
+
+*Description and Rationale for the Chosen Analysis* 
+With respect to customer segments that primarily fly to the Southwest (e.g., Las Vegas, Los Angeles, San Francisco, Phoenix, etc.), we identified the travel patterns for the four airports with the greatest number of flights by month. This is important to understand Sun Country's flight patterns to this region by city.    
+
+*Execution and Results (including code)*  
+Flight patterns in the Southwest region vary by city, especially from May to August. There is a decrease in flights to Phoenix and Las Vegas during this period. Simultaneously, the number of flights to Los Angeles and San Francisco increases. In addition, Las Vegas is the most popular city to fly into in all months except the May to August period where there are more flights to Los Angeles and San Francisco.  
+```{r}
+vacSunC257 <- sunC %>% filter(`cluster 3` == c(2,5,7))
+
+sunC_CA <- vacSunC257 %>%
+  filter(`cluster 3` == 2 | `cluster 3` == 5| `cluster 3` == 7) %>%
+  filter(End_Category == "Southwest") %>%
+  filter(realDest == "LAS" | realDest == "LAX" | realDest == "SFO" | realDest == "PHX") %>%
+  group_by(month_pt,  realDest) %>%
+  summarise(count_dest = length(realDest))
+
+sunC_CA$Ind <- ifelse(sunC_CA$realDest %in% c("LAX","SFO"), 1, 0)
+
+ggplot(sunC_CA, aes(month_pt, count_dest, col=factor(Ind))) + 
+  geom_line() +
+ labs(title= "Flights to Each Airport in Southwest by Month\n", y="Count",x="Month") + 
+  scale_x_continuous(breaks=limit, labels=label) + facet_wrap(~realDest) +
+  geom_point() + myTheme + scale_color_manual(guide=F, values=c(col1, col2)) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+*Interpretation*  
+The analysis suggests that Sun Country reduces its flight offerings in the summer to Phoenix and Las Vegas, which is reasonable given the heat in the desert during this time. Sun Country also simultaneously increases its flight offerings to San Francisco and Los Angeles during the summer.  
+
+*Conclusions*  
+This is important to understand how the distribution of groups flying to cities in the Southwest region varies by month. As we have three clusters that primarily contain groups flying to the Southwest, this is important as a reference point to understand how groups flying to the Southwest region varies across other features. In addition, it suggests that Sun Country should focus its vacation packages around these seasonal trends. Vacation packages should be offered in Phoenix and Las Vegas from October to May and should be offered in Los Angeles and San Francisco from April to September.  
+
+### Looking at flying season
+
+*Description and Rationale for the Chosen Analysis*  
+Given the distribution of groups flying to the Southwest by month, it was then important to identify the seasons during which groups fly to the Southwest by customer segment.
+
+*Execution and Results (including code)*  
+Two customer segments, clusters 2 and 7, tend to fly to the Southwest during non-peak seasons. Cluster 5 primarily flies to the Southwest during the Winter Break (i.e., late November to early January).  
+```{r fig.width = 9, fig.asp = .5}
+# filtering to cluster 2, 5, 7
+sunC_season <- vacSunC257 %>%
+  group_by(Season_label, `cluster 3`) %>%
+  summarise(season = length(Season_label))
+
+sunC_season_max <- sunC_season %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(season))
+
+sunC_ssn <- merge(sunC_season, sunC_season_max, by.x="cluster 3", by.y="cluster 3")
+sunC_ssn$color <- ifelse(sunC_ssn$season == sunC_ssn$max_val, 1, 0)
+
+ggplot(sunC_ssn, aes(Season_label, season, fill=factor(color))) + 
+  geom_bar(stat="identity", show.legend = F) + 
+  facet_wrap(~`cluster 3`, scales='free_y') + 
+  labs(title="Flight Seasonality Distribution by Cluster\n", y="Count",x="Season") + 
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2)) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+*Interpretation*  
+Given that cluster 5 tends to primarily fly to the Southwest from late November to early January, this suggests that it is important to target this segment during this time period (i.e., focus on Las Vegas). In addition, the other segments are less time-variant, except that they tend to fly during non-peak times. 
+
+*Conclusions*  
+We recommend Sun Country create packages that cater to when each segments tend to fly. For example, it would be important to create vacation packages over these time periods. In addition, based on this, it is important to identify the months in which groups in clusters 2 and 7 fly to the Southwest.  
+
+### Flights to the Southwest by Month
+
+*Description and Rationale for the Chosen Analysis*  
+Given the distribution of groups flying to the Southwest by season, it was then important to identify the specific months during which groups fly to the Southwest for the two segments that fly to the Southwest during the non-peak time of year.
+
+*Execution and Results (including code)*  
+Groups within cluster 2 generally fly at an increased rate during February and October. Groups within cluster 7 generally fly at an increased rate during May and October.
+```{r}
+sunC_dist <- vacSunC257 %>%
+  group_by(`cluster 3`, month_pt,  End_Category) %>%
+  summarise(count_dest = length(realDest))
+
+sunC_dist_2 <- sunC_dist %>%
+  filter(`cluster 3` == 2) %>%
+  filter(End_Category == "Southwest")
+
+# Cluster 7
+sunC_dist_7 <- sunC_dist %>%
+  filter(`cluster 3` == 7) %>%
+  filter(End_Category == "Southwest")
+
+sunC_dist_2$Cluster <- "2"
+sunC_dist_7$Cluster <- "7"
+plot_data2 <- rbind(sunC_dist_2, sunC_dist_7)
+
+ggplot(plot_data2, aes(x=month_pt, y=count_dest, group=Cluster)) + 
+  geom_point(aes(col = Cluster)) + geom_line(aes(col=Cluster)) + 
+  scale_x_continuous(breaks = seq(1,12,1), labels=label) + 
+  labs(title="Clusters 2 and 7 Flights by Month", y="Count",x="Month") + 
+  scale_color_manual(values = c(col1,col2)) + myTheme
+```
+*Interpretation*  
+Cluster 2, a group of of older passengers, tend to fly more in February and October in the Southwest. These are two months that the number of groups flying to Phoenix and Las Vegas increase, which indicate that these are important months to provide deals and packages to these cities. In addition, cluster 7, a group of younger passengers, tend to fly more in May and October, two months that coincide with more people flying to Las Vegas. As such, it could be important to provide specific packages catered to young groups in Las Vegas during these months.
+
+
+*Conclusions*  
+This is important to understand how the distribution of groups flying to cities in the Southwest region varies by month. The results suggests that Sun Country should focus its vacation packages around these seasonal trends. Vacation packages should be offered in Phoenix and Las Vegas from October to May and should be offered in Los Angeles and San Francisco from April to September with more targeted packages in Las Vegas in May and October to young passengers and in Phoenix and Las Vegas in February and October.
+
+### Group Size for Southwest  
+
+*Description and Rationale for the Chosen Analysis*  
+We identified the distribution of the oldest passenger in each group and the size of groups for each segment that primarily flies to the Southwest. This is important to understand the demographic profile of these customer segments.  
+
+*Execution and Results (including code)*  
+Of the groups in each segment flying to the Southwest, most of the groups consist of two people in cluster 2. In clusters 5 and 7, passengers primarily travel alone. Cluster 2, those flying in pairs, are older than the passengers in clusters 5 and 7. In addition, cluster 7 contains younger groups than cluster 5.  
+```{r fig.width = 9, fig.asp = .5}
+sunC_grp<- vacSunC257 %>%
+  group_by(group_label, `cluster 3`) %>%
+  summarise(group = length(group_label))
+
+sunC_grp_max <- sunC_grp %>%
+  group_by(`cluster 3`) %>%
+  summarise(max_val = max(group))
+
+sunC_group <- merge(sunC_grp, sunC_grp_max, by.x="cluster 3", by.y="cluster 3")
+sunC_group$color <- ifelse(sunC_group$group == sunC_group$max_val, 1, 0)
+
+ggplot(sunC_group, aes(group_label, group, fill=factor(color))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~`cluster 3`, scales='free_y') + 
+  labs(title="Size of Group Distribution by Cluster\n", y="Count",x="Group Size") + 
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2)) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+*Interpretation*  
+This analysis indicates that these customers primarily fly to the Southwest in groups (i.e., not alone) in cluster 2. These are also the oldest passengers. In contrast, passengers in the two younger segments tend to travel alone. This suggests that passengers in cluster 2 may travel to the Southwest for different reasons than passengers in clusters 5 and 7.  
+
+*Conclusions* 
+Since we have identified that families and couples primarily fly to Florida on Sun Country within this cluster, Sun Country could create connections with family resorts, hotels, and attractions (e.g., casino shows, golf, etc.) that fit the profile of these customers. This includes providing vacation packages with family resorts, hotels, and attractions or those attuned to older passengers to ease the logistical burden of booking a vacation to improve the customer experience. 
+
+*Description and Rationale for the Chosen Analysis*  
+We have observed how the clusters differ on travel time, destination and group size. The next place to look is by age. We want to understand our cluster ages because age has a strong impact on how we will market our marketing, advertising and product efforts. 
+
+*Execution and Results (including code)* 
+We use a box plot to succinctly display the distributions and differences in ages between the clusters.  
+```{r}
+ggplot(vacSunC257, aes(factor(`cluster 3`), maxAge)) + geom_boxplot(fill = col2) + 
+  labs(title="Age Distribution of Main Passenger by Cluster", y="Age",x="Cluster") + myTheme
+```
+  
+## Association Rules Continued
+
+*Description and Rationale for the Chosen Analysis*  
+As with before, we want to find associations within our clusters that will help us validate our previous findings and find new associations.
+
+### Cluster 1  
+
+*Execution and Results (including code)*  
+The following rules involve the first cluster. The first 5 rules are filtered and analyzed.  
+```{r}
+rules1 <- filter(sun_F, cluster == 1)[1:5] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 2) %>% 
+  subset(subset = (rhs %pin% "End_Category" & !(rhs %pin% "Minneapolis") & lhs %pin% "Start_Category")) %>%
+  sort(by = "count")
+inspect(rules1[1:5])
+```
+*Interpretation*  
+For cluster one, we see that the landing place is Mexico, which is exactly what we were looking for. On the left-hand side, we see a lot of flights from either Texas or Minneapolis with a group consisting of a couple. There are also some rules that show middle-aged fliers. 
+
+*Conclusions*  
+Beyond the right-hand side showing Mexico, we expected to see was spring break to occur on the left-hand side; it is possible that traveling over spring break is not as inherent to this cluster as would first indicate. It is important to note that the right-hand side is all Mexico, so spring breakers could be headed elsewhere (we tried removing Mexico from the right-hand as well, but no rules with proper lift appeared). Other than that, there is nothing really out of the ordinary in this cluster that we missed upon visualization.  
+
+### Cluster 2  
+
+*Execution and Results (including code)*  
+The following rules involve the second cluster. The first 5 rules are filtered and analyzed.  
+
+```{r}
+# making assoc rules via apriori algorithm on cluster 2
+rules2 <- filter(sun_F, cluster == 2)[1:5] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 2) %>% 
+  subset(subset = (rhs %pin% "End_Category" & !(rhs %pin% "Minneapolis") & lhs %pin% "Start_Category")) %>%
+  sort(by = "count")
+
+inspect(subset(rules2)[1:5])
+```
+
+*Interpretation*  
+For cluster two, we see that the landing places are Southwest or Mexico. This is little different than what we expected; the visual would indicate that Southwest would dominate in destinations. That being said, the associations on the left-hand side mostly mirrors what we had expected. They are during non-peak times and include old people in couples. 
+
+*Conclusions*  
+One thing we did not expect to see was the association with groups of fliers; this could mean that families take trips to Southwest around the same time. In terms of flights to Mexico, the first rule (for Mexico) is not very interesting because it involves the non-peak season as well as a starting region from Texas. Both are quite obvious as this cluster generally flies during non-peak times and trips to Mexico often have a layover in Texas. The last two rules, however, suggest that couples and seniors fly to Mexico under these same conditions, which could be potentially insightful information as it fits in more with the first cluster.  
+
+### Cluster 4  
+
+*Execution and Results (including code)*  
+The analysis is done only for cluster 4 and the data is transformed as transactions table to create association rules. First 5 rules are filtered and analysed  
+```{r pressure, echo=FALSE}
+
+rules4 <- filter(sun_F, cluster == 4)[-c(3, 7)] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 1.0) %>% 
+  subset(subset = rhs %pin% "End_Category") %>%
+  sort(by = "count")
+  
+inspect(subset(rules4)[1:5])
+
+```
+*Interpretation*  
+The rules reiterate the fact that customers in this groups are primarily flying to Florida in doubles. They are also old and go in doubles without Ufly membership. The rules also highlight the fact that the destination in Florida is primarily Orlando.  
+
+### Cluster 5  
+
+*Execution and Results (including code)*   
+The analysis is done only for cluster 5 and the data is transformed as transactions table to create association rules. First 5 rules are filtered and analysed  
+```{r}
+rules5 <- filter(sun_F, cluster == 5)[-c(3, 7)] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 1.0) %>% 
+  subset(subset = lhs %pin% "End_Category") %>%
+  sort(by = "support")
+  
+inspect(subset(rules5)[1:5])
+```
+*Interpretation*  
+The rules reiterate the fact that customers in this groups are singles flying to Southwest from Minneapolis during winter break. They are also mostly non-members. All the mentioned characteristics are highlighted in the association rules with strong support and confidence.  
+
+### Cluster 7
+
+*Execution and Results (including code)*  
+The analysis is done only for cluster 7 and the data is transformed as transactions table to create association rules. First 5 rules are filtered and analysed  
+```{r}
+rules7 <- filter(sun_F, cluster == 7)[-c(7)] %>% 
+  apriori(parameter=list(supp = 0.01, conf=0.5, minlen = 3), control = list (verbose=F)) %>% 
+  subset(subset = lift > 1.0) %>% 
+  subset(subset = lhs %pin% "End_Category") %>%
+  sort(by = "count")
+  
+inspect(subset(rules7)[1:5])
+
+# clean up the workspace - keep the normalize function
+rm(list=setdiff(ls(), c("cmd","normalize", "col1","col2", "col3", "myTheme")))
+```
+*Interpretation*  
+The rules again reiterate the fact that the cluster consists majorly of people going to Southwest from Minneapolis. It is important to note that these people are non members of the Ufly program.  
+  
+*Conclusions*  
+Notably, the majority of the rules in clusters 5 and 7 (sorted by count) have low lift. The rules in clusters 2 and 4 have much higher lifts. This indicates that the associations in clusters 2 and 4 are occurring more than random chance would hypothesize. In these clusters we see a lot of customers heading to the Southwest (cluster 2) and Florida (cluster 4). This is likely because these customers are looking to escape the harsh Minnesotan winters.
+  
+#Hierarchical Clustering to Compare with K-Prototypes
+
+*Description and Rationale for the Chosen Analysis*  
+All of our analysis was based on k-prototypes classification algorithm. Analyzing the data set through the lens of Hierarchical clustering algorithm will help us validate distinct groups within our data set. We can also compare our clusters obtained through the K-prototypes algorithm with that of Hierarchical and validate if the clusters obtained are vastly different or if they share some common features. This is important since K-prototype works on several assumptions (like globular shape of clusters) and Hierarchical approach can help us validate our obtained clusters since it does not consider the same assumptions.  
+
+*Execution and Results (including code)*  
+A sample of data is taken since Hierarchical clustering algorithm is a computationally challenging task. We transform our data set similar to our K-prototypes method for comparison purposes. Hierarchical algorithm works by merging two data points which are closest to one another and works itself up the data set until there is just one cluster. Since our data consists both continuous and categorical data set we use 'Gower' distance metric to calculate distance between similar points.  
+
+We can visualize these merges with a Dendogram where distances between the cluster merges helps us determine the appropriate number of clusters as well. We segment our sample data on the most appropriate cluster division and understand their characteristics.  
+
+```{r}
+#Read in the data
+proto_data <- fread("proto_data.csv")
+
+#show data
+head(proto_data)
+```
+
+```{r eval=F}
+#Running Hierarchial Clustering on a sample of dataset (5000) to validate K-Prototype Findings
+
+#Importing data
+sun_clust <- fread('PNR_level_data.csv')
+
+#Sampling data for easier manipulations
+#Reproduce the same sample back 
+set.seed(0)
+sample_rows <- sample(nrow(sun_clust),5000)
+sun_clust_sample <- sun_clust[sample_rows,]
+sun_hier <- proto_data[sample_rows,]
+
+#Converting Categorical to factors
+sun_hier$group_label <- as.factor(sun_hier$group_label)
+sun_hier$Season_label <- as.factor(sun_hier$Season_label)
+sun_hier$End_Category <- as.factor(sun_hier$End_Category)
+
+#Distance Calculations using Gower Distance
+sun_gower <- daisy(sun_hier,
+                   metric ="gower",
+                   type = list(logratio = 3))
+```
+
+The clustering data is listed above. Using the Gower distance we transform our variable distance space to a 0-1 range. This is an interesting proposition when considering factor variables because the Gower distance will coerce to k-1 dummy columns of [0,1]. Thus under the assumptions of gower distance, categorical features become very extreme in relation to scaled continuous variables which occupy the whole value space [0,1] relatively evenly in most cases.
+
+In the next stage of the processing we use the hclust package to hierarchically cluster our sample data.
+
+## Cluster Creation Overview  
+```{r eval=F}
+#Use Hierarchical Clustering
+sun_cluster <- hclust(sun_gower, method = "ward.D")
+
+plot(sun_cluster, hang =0, label = F, main ="Cluster Dendogram")
+```
+
+### Dendogram
+```{r echo=FALSE, fig.width=5, fig.height=3, fig.align='center'}
+img <- readPNG(paste0(cmd,"/h_clust_dendo.png"))
+grid.raster(img)
+```
+
+Overview of the dendogram. A solution with k = 4 appears to be optimal from the visual. It is also obvious to see how a solution with k = 7 may make sense.
+
+```{r eval=F}
+#Elbow method (we do not run this to save time, the png has been saved and loads instead)
+fviz_nbclust(sun_hier, FUN = hcut, method = "wss")
+```
+
+### Elbow Plot
+```{r echo=FALSE, fig.width=5, fig.height=3, fig.align='center'}
+img <- readPNG(paste0(cmd,"/h_clusts.png"))
+grid.raster(img)
+```
+
+The optimal cluster cutpoint occurs at k = 4.
+
+```{r eval=F}
+#Dividing into clusters based on Elbow and Dendogram
+groups <- cutree(sun_cluster, k = 4)
+
+#Joining data to cluster results
+clust_data <- cbind(sun_clust_sample, groups)
+
+#Binning by age
+clust_data <- clust_data %>%
+              mutate(age_bins = ifelse(maxAge < 15, 'Child',
+                                       ifelse(maxAge > 14 & maxAge < 31, 'Young',
+                                              ifelse(maxAge > 30 & maxAge < 46, 'Middle Age',
+                                                     ifelse(maxAge > 45 & maxAge < 61, 'Old','Senior')))))
+
+# write to csv to save run time and maintain stability
+write.csv(clust_data, "hier_data.csv", row.names=F)
+```
+
+We bind the cluster labels to the data and bin the ages to provide a comparison with the prototypes clusters later on.
+
+```{r}
+# read in data from hierarchical clustering to maintain stability
+clust_data <- fread("hier_data.csv")
+```
+
+## Visualizing the Clusters to Assess Similarity
+```{r}
+#Visualizing our clusters
+sm_data <- clust_data %>% 
+  group_by(groups,End_Category) %>% 
+  summarize(sum_val=sum(groups))
+  
+ mytable <- sm_data %>% 
+   group_by(groups) %>%
+   summarize(max_val=max(sum_val))
+ 
+ sm_data$ind <- ifelse(sm_data$sum_val %in% mytable$max_val, 1, 0)
+
+ggplot(sm_data, aes(End_Category, sum_val, fill = factor(ind))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~groups, scales='free_y') + 
+  labs(title="Distribution of Flight Destinations by Cluster\n", y="Count",x="Region") + 
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2)) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+```
+
+
+Clusters 1 and 2: Primary destination to vacation regions like Las Vegas, San Francisco and Los Angeles. However, customers in  Cluster 1 also fly to other destinations including Florida, Minneapolis and Mexico meanwhile Cluster 2's other destinations is Minneapolis.
+
+Clusters 3 and 4: Primary destination for customers in these clusters is Minneapolis. Other popular destinations include Las Vegas, Los Angeles and San Francisco.
+
+The following visuals are generated with similar code so we hide their code for brevity.  
+```{r echo=F}
+sm_data <- clust_data %>% 
+  group_by(groups,group_label) %>% 
+  summarize(sum_val=sum(groups))
+  
+ mytable <- sm_data %>% 
+   group_by(groups) %>%
+   summarize(max_val=max(sum_val))
+ 
+ sm_data$ind <- ifelse(sm_data$sum_val %in% mytable$max_val, 1, 0)
+
+ggplot(sm_data, aes(group_label, sum_val, fill = factor(ind))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~groups, scales='free_y') + 
+  labs(title="Distribution of Travel Size by Cluster", y="Count",x="Travel Size") + 
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2)) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+
+```
+
+Cluster 1: Customers in this cluster usually travel in groups which could suggest Family segments in this cluster. Given they fly to vacation destinations they could be flying for family vacations 
+Cluster 2: Customers in this cluster are primarily Couples who fly to popular vacation destinations.
+Cluster 3 and 4: Customers in these clusters are primarily Singles who fly to Minneapolis.
+
+```{r echo=F}
+sm_data <- clust_data %>% 
+  group_by(groups,age_bins) %>% 
+  summarize(sum_val=sum(groups))
+  
+ mytable <- sm_data %>% 
+   group_by(groups) %>%
+   summarize(max_val=max(sum_val))
+ 
+ sm_data$ind <- ifelse(sm_data$sum_val %in% mytable$max_val, 1, 0)
+
+ggplot(sm_data, aes(age_bins, sum_val, fill = factor(ind))) + 
+  geom_bar(stat="identity",show.legend = F) + 
+  facet_wrap(~groups, scales='free_y') + 
+  labs(title="Distribution of Max Age by Cluster", y="Count",x="Age") +
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2))
+```
+
+Cluster 1 and 2: Maximum age of customers in these segments are primarily composed of the Older segment. This would support the argument of families flying to vacation destinations. 
+Cluster 3 and 4: Maximum age of customers in these segments. Segment 4 also consists significantly of the older segment.
+
+```{r echo=F}
+sm_data <- clust_data %>% 
+  group_by(groups,UflyStatus) %>% 
+  summarize(sum_val=sum(groups))
+  
+ mytable <- sm_data %>% 
+   group_by(groups) %>%
+   summarize(max_val=max(sum_val))
+ 
+ sm_data$ind <- ifelse(sm_data$sum_val %in% mytable$max_val, 1, 0)
+
+ggplot(sm_data, aes(UflyStatus, sum_val, fill = factor(ind))) + 
+  geom_bar(stat="identity",show.legend = F) + facet_wrap(~groups, scales='free_y') + 
+  labs(title="Distribution of UFly Memebership by Cluster\n", y="Count",x="Membership") + 
+  myTheme + scale_fill_manual(guide=F, values=c(col1, col2))
+
+```
+
+Clusters 1,2,3 and 4: All clusters are mostly comprised of non-members, but there are relatively higher number of UFly members in cluster 3 and 4. This would lead us to suggest that customers flying into Minneapolis are majority of the Rewards members.
+
+*Interpretation of Hierarchical Clustering in Total*  
+Our ideal clustering solution from the Dendogram and Elbow Plot suggests the number of clusters as 4. Most interestingly, our elbow plot from our K-Prototypes partitioning also suggested a potential cutoff at 4 clusters. Ultimately we chose to use 7 because we saw SSE drop off further and felt that clusters could be re-merged later if the differences were not significant. Visualizing these clusters across categories of Groups, Destinations, Max Age and UFly Membership we can identify the following characteristics for each cluster:  
+
++ Cluster 1 - Families flying to destinations like Las Vegas, Florida and other Holiday destinations. 
++ Cluster 2 - Older couples flying to vacation destinations like Las Vegas and San Francisco
++ Cluster 3 - Young Singles flying into Minneapolis
++ Cluster 4 - Young/Old Singles flying into Minneapolis with some UFly members.
+
+*Conclusions of Hierarchical Clustering in Total*  
+  
+Key:  
+  
++ K-Prototypes Clusters <- nP (where n is [1, 7])
++ Hierarchical Clusters <- nH (where n is [1, 4])
+  
+Hierarchical clustering's solution provides us with 4 clusters which share characteristics with clusters that we identified with K-prototypes clustering algorithm. Cluster 1H has similar characteristics with that of Clusters 2P and 5P - Older couples and families flying to popular vacation destinations. Similarly Cluster 2H shares characteristics with Cluster 4P - Old couples to vacation destinations. Cluster 3H and 4H are similar to Cluster 6P and Cluster 7P - Tourists arriving to Minneapolis and Young Singles to vacation destinations like Las Vegas respectively. Thus, even our Hierarchical clustering solution provide us with 4 distinct clusters on a small sample size of 5000 which can lead us to suggest that Sun Country customers can be clustered into distinct groups which they can utilize to improve customer recommendations.
+
+# Recommendations
+As we have illustrated we have two distinct divisions encompassing 7 customer segments (clusters). Below we provide tailored recommendations for each division and their com-positional segments.
+
+## Flyers Traveling to Minneapolis
+There are two main divisions of flyers that travel to Minneapolis, which combine to encompass approximately half of groups flying on Sun Country. These divisions are split into clusters 3 and 6, and clusters 1, 2, 4, 5 and 7. Both divisions primarily consist of flyers traveling to Minneapolis during the summer. Given Sun Country's Minnesotan roots, we recommend creating a Minnesota-themed travel package, including partnerships with:  
+  
+**Clusters 3 & 6** 
+
++ Popular hotels (Radisson Hotels) 
++ Local restaurants (The Blue Door Pub)
++ Sports teams (Minnesota Twins/Minnesota Timberwolves)
++ Outdoor activities (Nice Ride Minnesota)
+
+This package allows for Sun Country to further distinguish itself as the preeminent airline for travel to Minnesota, and can apply to both segments of travelers to Minneapolis. While this package can attract flyers from both segments, there are some differences between the segments where Sun Country can capitalize. 
+
+In addition to the shared characteristics between these segments, main distinguishing factors are that the first segment (Cluster 6) is comprised of younger flyers (average maximum age of 28) who are usually not Ufly rewards members and also travel to Minnesota during December. The Ufly rewards program is an opportunity for Sun Country to build brand loyalty and is comprised of older flyers, so this segment could be an untapped opportunity to build a younger Ufly rewards flyer base. We suggest that Sun Country promote free WiFi on flights to Minneapolis for Ufly rewards members. Younger customers lead digitally connected lives and the incentive of free WiFi could be enough to sway them into membership. 
+
+## Flyers Traveling to Vacation Destinations
+There are five segments of customers who primarily fly to various vacation destinations including Las Vegas, Mexico, California, Phoenix and Florida. They are comprised of all age groups and seasons. We recommend rotating vacation packages to different destinations depending on flyer demand to improve customer satisfaction:  
+  
+**Clusters 1, 2, 4, 5, 7** 
+
+* Partnership with Family resorts in Mexico during Spring Break (Cluster 1)
+    + There are frequent group flights to Mexico during the Spring Break season. Partnering with resorts in popular destinations such as Cancun and Puerto Vallarta would ease the logistical burden of vacation planning for potential flyers.
+* Tour packages for attractions in Florida during Spring Break (Cluster 4)
+    + There is a spike of flyers that visit Fort Myers in March which coincides with the Spring Training season of the Minnesota Twins. Deals with the Twins corresponds with the previously suggested partnership, and it can attract additional flyers who were looking to visit Spring Training. 
+    + Middle and older age groups usually fly to Orlando during Spring Break, which includes popular family vacation destinations such as Disney World and Sea-World. Travel packages to those entertainment venues can attract more Sun Country flyers during the Spring Break period.
+* Las Vegas and Phoenix packages from October through April (Clusters 2, 5, 7)
+    + Las Vegas is a popular destination for all ages and group sizes, this package could include stays at popular casinos on the Las Vegas Strip at times during this period.
+    + Partnerships with popular Hotels packaged with other local activities (such as a golf course/hotel combo package) could cater to the interests of the older segment of flyers to Phoenix.
+* Hotel and sightseeing packages to California from April to September (Cluster 2, 5, 7)
+    + Los Angeles and San Francisco have peak travel seasons during the summer, Sun Country could pair with local tourism agencies to create a sight-seeing package at these destinations.
+
+## Conclusion
+Sun Country has the potential to utilize customer segmentation to distinguish themselves as: 
+
+* The premier airline for flyers travelling to Minneapolis
+* The airline that Minnesotans look towards when booking a vacation
+
+In order for Sun Country to extract the most value from the latent segments in its customer base it should institute stricter data quality controls. A portion of the analysis involved isolating errors and imputing values. Cleaner data provides two benefits. It reduces the labor cost of analysis and it increases the validity of findings.
+
+Sun Country occupies a unique and precarious position within the greater aviation transportation industry. Identifying and extracting customer dynamics is key to future stability. Sun Country's customer base comprises of two distinct divisions. Customers flying to Minneapolis and those flying to vacation destinations such as Cancun or Las Vegas. The first division consists of two discrete segments with the latter consisting of five. We hypothesize that Sun Country will find value in creating a strong base of partnerships with Minnesotan organizations, and creating travel packages that pair with the top attractions in regions that are of the highest demand for their identified customer segments. Additionally, we believe that the airline can capitalize on the population dynamics of its segments to grow its Ufly Membership base among its younger customers. 
+

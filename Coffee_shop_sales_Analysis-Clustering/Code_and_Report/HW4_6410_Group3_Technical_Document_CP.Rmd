@@ -1,0 +1,1452 @@
+---
+title: "6410 HW 4 - Central Perk - Group 3"
+author: "Jordan Boonstra, Deeksha Jha, Henrik Kowalkowski, Mao Mao, Prasanna Rajendran, Madhur Toshniwal"
+date: "November 3, 2018"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+urlcolor: blue
+---
+
+```{r include=F, message=F}
+# Load Packages
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)  # for multi-graph plotting
+library(data.table)
+library(stringr)
+library(lubridate)
+library(png)  # for more control over graphics
+library(grid)  # for more control over graphics
+library(scales)
+library(ggfortify)  # PCA
+library(stats)  # PCA
+library(cluster)
+library(broom)
+```
+
+```{r setup, include=F}
+# Save your root directory below:
+
+HK <- "C:/Users/henri/Google Drive/School/2018-2019 Carlson MSBA/2018 Exploratory Data Analytics 6410/HW 4/"
+JB <- ""
+DJ <- "~/Desktop/Fall/MSBA 6410_EDA/HWs/Hw4"
+MM <- ""
+MT <- ""
+PR <- "/01 Drive/UMinn/Fall/EDA/Homeworks/HW4/Central Perk/"
+cmd <- HK
+
+# Set your directory with your variable!
+
+knitr::opts_knit$set(root.dir = cmd)
+knitr::opts_chunk$set(comment = NA)
+rm(HK, DJ, JB, MM, MT, PR)
+```
+
+```{r include = F}
+# Set Color Scheme and Theme
+
+col1 <- "#ffcd00"
+col2 <- "orangered2"
+col3 <- "#cccccc"
+
+myTheme <- theme_classic() + theme(axis.text = element_text(size = 10),
+                          axis.title = element_text(size = 12),
+                          title=element_text(size=14), 
+                          plot.title = element_text(hjust = 0.5),
+                          plot.subtitle = element_text(hjust = 0.5))
+```
+
+# Introduction  
+
+## Central Perk's Situation  
+
+Central Perk shop, situated in New York City is a boutique coffee shop that primarily sells coffee along with 8 other category of items. Central Perk believes that their customers are fairly loyal to the shop and they have a steady business. With that, they would like to have a general sense of their customers' buying pattern in terms of products and categories and their temporal demand to increase sales by price adjustments. Central Perk also would like to normalize the demand of items over time across days and within a day as the demand of items is uneven during a given period.  
+
+## The Business Problem and Approach   
+
+Central Perk wants to normalize their demand across day by providing pricing adjustments and incentives to their customers. We believe that the best way to cater to these needs is to segment Central Perk's customer base by using a clustering based approach and find the target clusters to act upon. With this information, we structured our analysis as follows:  
+  
+1. Data cleaning and Manipulation
++ Central Perk's data contained some anomalies for which we imputed with relevant values using appropriate methods possible and we also created additional variables for convenience of analysis
+2. Overview of the Central Perk's Operations
++ We analyzed the demand of items in different attributes such as category purchased, month, time of the day, day of the week, Members vs non-members, etc.
+3. Determining the optimal features to cluster on
++  We created additional variables that gives more insight into customer's buying pattern and chose the most important ones using Principal Component Analysis
+4. Clustering with k-means
++ We clustered using k-means in order to use both continuous and categorical features
++ This analysis identified 7 distinct clusters of members
+5. Cluster analysis with high level visualization
++ We visualized summary statistics of each cluster to determine why it was formed and dove deeper into clusters which were informative and found insights to leverage their behavior
+6. Ideas to refine the brand
++ We also analysed other generic trends in demand for certain categories specifically and found patterns that were interesting to act upon apart from the clusters generated earlier  
+  
+In the end, we find that Central Park has a number of discrete customer segments that it can leverage with customized targeting in a manner that avoids customer alienation. Using the temporal and product oriented tendencies of these clusters we isolate ways to smooth the volatility in Central Perk's demand. In analyzing Central Perk's product mix, we find areas for improvement in terms of price and inventory.  
+
+# Data Cleaning and Analysis  
+
+We read in each year's data and combine them together so that we can clean them in fewer steps. The combined file is written to disk so that it can be loaded easily later.  
+```{r eval=F}
+df16 <- fread("Central Perk/Central Perk Item Sales Summary 2016.csv")
+df17 <- fread("Central Perk/Central Perk Item Sales Summary 2017.csv")
+df18 <- fread("Central Perk/Central Perk Item Sales Summary 2018.csv")
+
+combined <- rbind(df16, df17, df18)
+write.csv(combined, "central_perk_data.csv", row.names = F)
+rm(df16, df17, df18, combined)
+```
+
+We read the combined data in to memory so that we can clean it.  
+```{r eval=F}
+data <- fread("central_perk_data.csv")
+```
+
+### Filtering the duplicated records  
+We remove the duplicated records because we do not want to double count transactions.
+```{r eval=F}
+dupes <- data[duplicated(data), ]
+sales <- data[!duplicated(data), ]
+```
+
+### Changing the data type of columns and creating new variables  
+We remove the refund transaction types. This assumes that refunds do not have a significant impact on Central Perk's bottom line as by removing them we are ignoring them in the analysis. We strip the "$" signs from the numeric columns so they can be coerced to numerics. We assume a profit margin of 20% per transaction as defined in the guidelines.  
+```{r eval=F}
+sales_data <- sales %>%
+  filter(Event.Type == "Payment") %>%  # filtering out the "Refund" event type (87 records)
+  mutate(Category = as.factor(Category), Price.Point.Name = as.factor(Price.Point.Name), 
+         Gross.Sales = as.numeric(gsub("\\$", "", Gross.Sales)),
+         Discounts = as.numeric(gsub(")","",gsub("\\(", "-", gsub("\\$", "", Discounts)))),
+         Net.Sales = as.numeric(gsub("\\$", "", Net.Sales)),
+         Tax = as.numeric(gsub("\\$", "", Tax)),
+         Event.Type = as.factor(Event.Type),
+         Cost = 0.8 * Gross.Sales,
+         Item = replace(Item, Item == "\U0001f34bLemonade\U0001f34b", "Lemonade"))
+```
+
+### Creating date and time variables  
+We create date variables to use in reshaping and plotting.  
+```{r eval=F}
+sales_data$Date_time <- strptime(paste(sales_data$Date, 
+                                       sales_data$Time, sep = ' '),"%m/%d/%y %H:%M:%S")
+sales_data$Month <- month(sales_data$Date_time)
+sales_data$Hour <- hour(sales_data$Date_time)
+sales_data$Wk_day <- wday(sales_data$Date_time)
+sales_data$UID <- seq.int(nrow(sales_data))
+```
+
+### Create more readable member tags  
+We overwrite the customer ID string with a simpler numerical mapping to help us better visualize and reshape the data for member customers.    
+```{r eval=F}
+custs <- unique(sales_data$Customer.ID)
+mapping <- data.frame(Customer.ID = custs, New.ID = seq(0, length(custs)-1))
+mapping <- na.omit(mapping)  # drop NA mapping
+
+sales_data$New.ID <- mapping$New.ID[match(sales_data$Customer.ID, mapping$Customer.ID)]
+sales_data$New.ID[is.na(sales_data$New.ID)] <- "Non-Member"
+```
+
+### Selecting the required columns  
+We select a subset of the dimensions we have available to help focus our analysis.  
+```{r eval=F}
+sales_data <- sales_data %>%
+  select(UID, Category, Item, Qty, Price.Point.Name, 
+         Gross.Sales, Discounts, Net.Sales, Tax, Notes, Event.Type,
+         Customer.ID, New.ID, Cost, Date_time, Month, Hour, Wk_day)
+```
+
+### Saving the cleaned data for later  
+We write the cleaned data to disk to save computational time later.
+```{r eval=F}
+# Writing the clean to disk
+write.csv(sales_data, "CP_clean.csv", row.names = F)
+```
+
+### Reading in the cleaned data for reshaping  
+We read back in the cleaned data in order to reshape it to the customer level.  
+```{r}
+Central_Perk <- fread("CP_clean.csv")
+# coerce Date_time column to DT
+Central_Perk$Date_time <- ymd_hms(Central_Perk$Date_time)
+```
+
+# Overview of Central Perk's operations  
+
+## Historical performance 
+
+#### Historical data reshaping  
+We add year and week variables to help us in grouping the historical data for plotting.  
+```{r}
+# Historical Volume - create ym variable
+temp1 <- Central_Perk %>%
+  mutate(Year = year(Date_time),
+         Week = week(Date_time))
+```
+
+We group by year and month to get a high level overview of Central Perk's performance over the period 2016-2018. We assume that data at the month level is granular enough to adequately capture Central Perk's performance.
+```{r}
+# reshape data
+temp <- temp1 %>%
+  select(Year, Month, Net.Sales) %>%
+  group_by(Year, Month) %>%
+  summarize(ct = n(), revenue = sum(Net.Sales)) %>%
+  arrange(Year, Month) %>%
+  ungroup() %>%
+  mutate(Year_month = paste(Year, Month, sep="-"))
+
+temp$xs <- seq(1,nrow(temp))
+```
+
+### Item volume and sales revenue over time  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to see how many items Central Perk has been selling and how much revenue it has been generating over the period of the data to get a sense of its performance. This will help us assess if changes need to be made or if Central Perk should stay the course.  
+
+*Execution and Results (including code)*  
+We plot volume and revenue on top of each other in order to compare whether they have been moving together or not. We use a line chart overlaid with a smoothing line to illustrate the performance over the period. The line chart is used because it conveys temporal continuous data effectively. The smoothing line is used because it helps the eye more easily understand the trend in the data. The grey region around the smoothing line is the standard error of the line.  
+```{r fig.width=8, fig.asp=1}
+# Plot sales volume over time
+p1 <- ggplot(temp, aes(x=xs, y=ct, group=1)) + 
+  geom_line(col=col1)  + myTheme +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) + 
+  geom_smooth(col=col2, alpha=.2) + scale_x_discrete(limit = temp$Year_month) +
+  labs(title="Central Perk Volume over Time", x=NULL, y="Number of Items Sold")  +
+  scale_y_continuous(breaks=seq(0, max(temp$ct)*1.2, 2000), 
+                     limits=c(0,max(temp$ct)*1.2), labels = comma)
+
+# Plot revenue over time
+p2 <- ggplot(temp, aes(x=xs, y=revenue, group=1)) + 
+  geom_line(col=col1)  + myTheme +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) + 
+  geom_smooth(col=col2, alpha=.2) + scale_x_discrete(limit = temp$Year_month) +
+  labs(title="Central Perk Revenues over Time", x="Period (Months)", y="Dollars") +
+  scale_y_continuous(breaks=seq(0, max(temp$revenue)*1.2, 5000), 
+                     limits=c(0,max(temp$revenue)*1.2), labels=dollar_format())
+
+grid.arrange(p1, p2, nrow=2)
+```
+*Interpretation*  
+Central Perk's volume has been increasing 2016-2018 but its revenues have not. This leads us to hypothesize that Central Perk is selling more lower priced items than it has in the past.
+
+*Conclusions*  
+We do not know the cause of this, it could be because of a shift in member/non member purchases or changing customer preferences. This graph points out that we should definitely look into the components of Central Perk's revenue, e.g. its market basket.  
+
+## Demand Volatility  
+
+### Revenues by year and month   
+
+*Description and Rationale for the Chosen Analysis*  
+We have looked at the data in a linear fashion across the full period, thus the next step is to understand the seasonality of Central Perk's revenues. We hypothesize that Central Perk's financial performance changes in different seasons because its product mix shifts and consumer norms shift. Thus we expect to see crests and troughs in the revenue data on a monthly basis broken out by year.  
+
+*Execution and Results (including code)*  
+We use a line chart as the visualization technique. This helps us view the trend over time. We illustrate the trend in each year by using year as a grouping factor variable. We have data for all of 2017, but only 6 months of 2016 and 2018.  
+```{r}
+# Plot revenue over time
+ggplot(temp, aes(x=Month, y=revenue, group=factor(Year), 
+                 color=factor(Year))) + geom_line() +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) +
+  labs(title="Central Perk Revenues over Time", 
+       x="Period (Months)", y="Dollars") + myTheme +
+  scale_x_discrete(limit = month.abb) + guides(color=guide_legend(title="Year")) + 
+  scale_color_manual(values=c(col1,col2,col3)) +
+  scale_y_continuous(breaks=seq(0, max(temp$revenue)*1.2, 5000), 
+                     limits=c(0,max(temp$revenue)*1.2), labels=dollar_format())
+```
+*Interpretation*  
+2016 has a very low point in July, this is because we do not capture a full month's sales. Generally, we can see that regardless of year, the trend in seasonality is generally the same. 2016 and 2018 crest trough where 2017 crests and troughs.
+
+*Conclusions*  
+Central Perk has general seasonal trends that should be interesting to explore and potentially smooth out to put the owners and investors more at ease regardless of the period in the year.  
+
+#### Summarize the data for weekday analysis  
+The data is grouped down to the weekday level so that we can re-aggregate it to get a sense for how Central Perk performs on each day of the week.    
+```{r}
+# Week day averages
+temp <- temp1 %>%
+  group_by(Wk_day, Week, Month, Year) %>%
+  summarize(ct = n(), day_rev = sum(Net.Sales)) %>%
+  group_by(Wk_day) %>%
+  summarize(mean_wkday_rev = mean(day_rev),
+            mean_wkday_ct = mean(ct))
+    
+```
+
+### Central Perk average volume and revenue by day of the week  
+
+*Description and Rationale for the Chosen Analysis*  
+We understand that Central Perk's performance has not been getting better in terms of net revenue. We have also seen that Central Perk's sales exhibit seasonal variation. It follows that it will be necessary to explore Central Perk's performance at the weekday level to see where additional variation may be arising from.  
+
+*Execution and Results (including code)*  
+We plot revenue and volume together using bar charts so that we can compare them internally, between days and externally, revenue versus volume. The data is grouped to each individual weekday and then averaged across all weekdays. Thus, we assume that for the past year each Monday, for example, has behaved similarly and thus we can average all Mondays and so on for the other days.  
+```{r fig.width=9, fig.asp=.4}
+# Plot day of the week volume
+wkdays <- c("Sun", "Mon", "Tues", "Wed", "Thur", "Fri", "Sat")
+p1 <- ggplot(temp, aes(x=Wk_day, y=mean_wkday_ct)) + 
+  geom_bar(stat="identity", fill=col1)  + myTheme +
+  scale_x_discrete(limit = wkdays) +
+  labs(title="Central Perk Volume over the Week", x=NULL, y="Number of Items Sold") +
+  scale_y_continuous(breaks=seq(0, max(temp$mean_wkday_ct)*1.2, 50), 
+                     limits=c(0,max(temp$mean_wkday_ct)*1.2))
+
+# Revenue by weekday
+p2 <- ggplot(temp, aes(x=Wk_day, y=mean_wkday_rev)) + geom_bar(stat="identity", fill=col1) +
+  labs(title="Central Perk Revenues over the Week", x=NULL, y="Dollars") + myTheme +
+  scale_x_discrete(limit = wkdays) +
+  scale_y_continuous(breaks=seq(0, max(temp$mean_wkday_rev)*1.2, 250),
+                     limits=c(0,max(temp$mean_wkday_rev)*1.2), labels=dollar_format())
+
+grid.arrange(p1, p2, nrow=1, bottom=textGrob("Weekday", gp=gpar(fontsize=12)))
+```
+*Interpretation*  
+Central Perk's volume and revenues for each average day are nearly identical. Additionally, we notice that both of these metrics spike on Saturday and Sunday and are largely flat across the weekdays, Monday through Friday.
+
+*Conclusions*  
+It appears that Central Perk is likely selling the same product mix for each day in the week because the revenues and volumes line up nearly identically. Additionally, if Central Perk is interested in smoothing out their demand it looks like we should look to boost sales during the working week.  
+
+#### Summarize the data for hourly analysis  
+We take the data down to the hourly level and then re-aggregate it for plotting.  
+```{r}
+# Hourly analysis (volume) and (revenue)
+temp <- temp1 %>%
+  group_by(Hour, Wk_day, Week, Month, Year) %>%
+  summarize(ct = n(), day_rev = sum(Net.Sales)) %>%
+  group_by(Hour) %>%
+  summarize(mean_hr_rev = mean(day_rev),
+            mean_hr_ct = mean(ct))
+```
+
+### Central Perk average volume and revenue by hour  
+
+*Description and Rationale for the Chosen Analysis*  
+Our final unit of temporal variation left unexplored is in the hours of operation. We know that we need to smooth demand across the days of the week and it will be interesting to see whether we also need to smooth demand across the hours in the day.  
+
+*Execution and Results (including code)*  
+We employ bar charts because they help effectively display discrete differences in the data. By averaging the hours in the year that we are analyzing we assume that there has not been a drastic shift in how each hour behaves in terms of volume and sales.  
+```{r fig.width=9, fig.asp=.4}
+# Plot hourly volume
+p1 <- ggplot(temp, aes(x=Hour, y=mean_hr_ct)) + 
+  geom_bar(stat="identity", fill=col1)  + myTheme +
+  labs(title="Central Perk Volume over the Hours", x=NULL, y="Number of Items Sold") +
+  scale_x_continuous(breaks=seq(1,24)) +
+  scale_y_continuous(breaks=seq(0, max(temp$mean_hr_ct)*1.2, 10), 
+                     limits=c(0,max(temp$mean_hr_ct)*1.2))
+
+# Revenue hourly
+# Plot revenue over time
+p2 <- ggplot(temp, aes(x=Hour, y=mean_hr_rev)) + geom_bar(stat="identity", fill=col1) +
+  labs(title="Central Perk Revenues over the Hours", x=NULL, y="Dollars") + myTheme +
+  scale_x_continuous(breaks=seq(1,24)) +
+  scale_y_continuous(breaks=seq(0, max(temp$mean_hr_rev)*1.2, 25),
+                     limits=c(0,max(temp$mean_hr_rev)*1.2), labels=dollar_format())
+
+grid.arrange(p1, p2, nrow=1, bottom=textGrob("Hour (24-hour clock)", gp=gpar(fontsize=12)))
+```
+*Interpretation*  
+We can see that the 8 to 11 period in the morning sees the most revenue and volume. Once again the product mix likely is not changing hour to hour because the revenue and volume plots are near mirror images.
+
+*Conclusions*  
+It is obvious that Central Perk will require recommendations for smoothing at the hourly level. Additionally, we should look into smoothing strategies based on product mix because it appears that Central Perk is selling the same basket of goods across each hour given the similarity between the revenue and volume plots. If Central Perk is able to sell more items that sell well later in the day then it may be able to smooth out its demand over the hours.  
+
+#### Creating transaction Id based on time stamp  
+We want to get the data at transaction level. The basic assumption is that multiple checkouts or cashiers do not exist and that's why one time stamp can represent one transaction. A new column called transId is added which acts as a unique identifier of one transaction. 
+```{r}
+trans <- unique(Central_Perk$Date_time)
+trans_mapping <- data.frame(Date_time = trans, transID = seq(0, length(trans)-1))
+trans_mapping <- na.omit(trans_mapping)  # drop NA mapping
+
+Central_Perk$transID <- trans_mapping$transID[match(Central_Perk$Date_time, trans_mapping$Date_time)]
+```
+
+## Members versus non-members (member value)
+
+### Checking if members generate more business value than non-members  
+
+*Description and Rationale for the Chosen Analysis*  
+Central Perk posits that its "friends", i.e. its members, are its most valuable customers. We are interested in exploring the members because we have data that we can collect on them and group them by at the customer level since we have IDs. However, before we dive into this analysis we need to be sure that members are living up to Central Perk's lofty claims.  
+
+*Execution and Results (including code)*  
+We use faceted bar plots with membership status highlighted to illustrate where Central Perk is generating its revenues from. This analysis assumes that the groups are similar within and heterogeneous between. Thus we are assuming that members as a whole are more or less valuable than non-members as a whole.  
+```{r fig.width=7, fig.asp=.4}
+Central_Perk %>% 
+               mutate(`Member` = ifelse(New.ID =="Non-Member","No","Yes")) %>%
+               group_by(`Member`) %>%
+               summarise(`Item Count` = sum(Qty), 
+                         `Sales Total` = sum(Net.Sales), 
+                         `Num of Transactions` = n_distinct(transID)) %>%
+               select(`Member`,`Item Count`,`Sales Total`,
+                      `Num of Transactions`) %>%
+               gather(-`Member`, key="varx", value="valuex") %>%
+               mutate(`Member` = factor(`Member`)) %>%
+  
+  ggplot(aes(x=varx, y=valuex, fill=`Member`)) + 
+  geom_bar(stat="identity", position=position_dodge()) +
+    facet_wrap(~ varx, scales="free", nrow = 1) + 
+  geom_text(aes(label=comma(valuex)), 
+            position=position_dodge(width=1), vjust=2, size=4, color="white") +
+    labs(y="Values", x="Variables", 
+         title="Member versus Non-Member", subtitle="Aggregate Value") + 
+  scale_fill_manual(values=c(col3, col2)) + myTheme + 
+  theme(axis.text.x.bottom = element_blank(), axis.ticks.x.bottom = element_blank(),
+        axis.line.y = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank())
+```
+
+```{r fig.width=5, fig.asp=.62, echo=F}
+Central_Perk %>% 
+               mutate(`Member` = ifelse(New.ID =="Non-Member","No","Yes")) %>%
+               group_by(`Member`) %>%
+               summarise(`Sales per Transaction` = mean(Net.Sales), 
+                         `Items per Transaction` = mean(Qty)) %>%
+               select(`Member`,`Sales per Transaction`,`Items per Transaction`) %>%
+               gather(-`Member`, key="varx", value="valuex") %>%
+               mutate(`Member` = factor(`Member`)) %>%
+  
+  ggplot(aes(x=varx, y=valuex, fill=`Member`)) + 
+  geom_bar(stat="identity", position=position_dodge()) +
+    facet_wrap(~ varx, scales="free", nrow = 1) + 
+  geom_text(aes(label=round(valuex,2)), 
+            position=position_dodge(width=1), vjust=2, size=4, color="white") +
+    labs(y="Units per Transaction", x=NULL, 
+         title="Member versus Non-Member", subtitle="Per Transaction Value") + 
+  scale_fill_manual(guide=F, values=c(col3, col2)) + myTheme +
+  theme(axis.text.x.bottom = element_blank(), axis.ticks.x.bottom = element_blank(),
+        axis.line.y = element_blank(), 
+        axis.ticks.y = element_blank(), axis.text.y = element_blank())
+```
+*Interpretation*  
+We observed that our members generate almost double the revenue (Sales Total) as compared to non-members. They  also spend more on each transaction (Sales per Transaction). Members also buy more items per transaction (Items per Transaction). Additionaly, in the aggregate, members purchase more items across more transactions (Item Count and Num of Transactions).  
+
+*Conclusions*  
+We conducted the member/non-member analysis to see where Central Perk is deriving most of its revenues and where it should look to devote its resources. We see that across all of the transaction level and aggregate statistics, members are more valuable than non-members. Ultimately Central Perk is interested in the dollar value it gets per transaction. We see that members provide a greater dollar value per transaction, \$3.28 vs \$3.22 but we should be sure of this by using a statistical test of means.
+
+### Statistical test of means, sales per transaction
+
+*Description and Rationale for the Chosen Analysis*  
+We need to use a statistical test to see if the difference in sales between members and non-members is real or due to chance.  
+
+*Execution and Results (including code)*  
+Since we have two groups we will use a t-test. We must assume normality of the variable being sampled.
+
+```{r}
+mem <- Central_Perk %>% 
+  mutate(member_flag = ifelse(New.ID =="Non-Member","No","Yes")) %>%
+  filter(member_flag == "Yes") %>%
+  select(Net.Sales)
+
+non_mem <- Central_Perk %>% 
+  mutate(member_flag = ifelse(New.ID =="Non-Member","No","Yes")) %>%
+  filter(member_flag == "No") %>%
+  select(Net.Sales)
+
+# T.test
+t.test(mem, non_mem, alternative = "greater", var.equal=TRUE)
+```
+*Interpretation*  
+At a p of virtually zero, members have a significantly higher mean sales per transaction than non-members.  
+
+*Conclusions*  
+We should explore members in more depth because they provide Central Perk with greater absolute and marginal revenue.
+
+## Conclusions of historical Analysis, demand volatility and member value  
+  
+*Historically*  
+
+* Central Perk's volume has been increasing across the 2 year period
+* Central Perk's revenues have remained flat across the 2 year period
+
+*Demand Volatility*  
+
+* Central Perk sees its lowest volumes and revenues during the cold months, January, February, March, November and December
+* Central Perk sees greater volumes and revenues during weekends vs weekdays
+* Central Perk sees greater volumes and revenues in the period 7-11AM decreasing after that
+
+*Members vs Non-Members*  
+
+* Central Perk members generate significantly greater value per transaction
+* Central Perk members generate far greater absolute sales and volumes as well  
+  
+Ultimately we see that Central Perk has leveled off in the long run in terms of its revenues, we will look for ways to increase these. Additionally, we see that Central Perk experiences demand volatility across a variety of temporal axes. Finally, we find that Central Perk members are incredibly valuable to the business.  
+
+Given these findings, we will look to cluster members into groups to understand if there are temporal tendencies that we can exploit to smooth demand. Additionally, we will see if there are products that members do not like that can be cut without alienating them while helping our bottom line.  
+
+# Clustering on loyal customers  
+
+## Part 1 - Reshaping data to  customer level  
+In order to cater to the needs of our member customers, we need to look into the different types of customers present in our base. Once we can differentiate the customer behavior across groups, we will be able to design customer centric marketing offers, which will positively impact customer engagement and revenue.  
+
+### Creating customer level data and adding behavioral metrics 
+After we segregate our customer base into our member customers, we quantify their behavior using the following metrics across two years:  
+  
+(A) The value added by the customer
+  1. Number of transactions 
+  2. Average number of items bought in one transaction
+  3. Total revenue generated  
+  
+(B) Customer preferences
+  1. The total number of visits to indicate their visiting frequency
+  2. The proportion of visits made during different times of the day (morning, afternoon and evening) to indicate their preferred time of visit
+  3. Preferred days of visit between weekdays and weekends to identify when they are more likely to visit
+  4. The average number of categories they buy from in each transaction  
+```{r eval=F}
+## Creating a customer base of only members
+CP_loyalty_base <- Central_Perk %>% 
+                       mutate(member_y_n = ifelse(New.ID =="Non-Member","n","y")) %>%
+                       filter(member_y_n == "y") 
+
+##  Finding no of transactions, qty bought, sales total, customer lifetime
+CP_loyalty_aggr <- CP_loyalty_base %>%
+                        group_by(New.ID,transID,Date_time)%>%
+                        summarise(item_count=sum(Qty), sales_total = sum(Net.Sales)) %>%
+                        select(New.ID,transID,Date_time,item_count,sales_total)%>%
+                        arrange(New.ID,Date_time) %>%
+                        group_by(New.ID) %>%
+                        summarise(n_trans = n_distinct(transID), 
+                                  items_per_trans=sum(item_count)/n_trans, 
+                                  sales_total = sum(sales_total))
+
+### Binning hours of the day into Morning, Afternoon and Evening to identify timing preferences
+CP_loyalty_hrs <- CP_loyalty_base %>%
+                        mutate( timings = case_when(( Hour < 11) ~ "Morning",
+                                                    (Hour >= 11 & Hour < 16) ~ "Afternoon",
+                                                    TRUE ~ "Evening")) %>%
+                        group_by(New.ID,timings)%>%
+                        summarise(timing_cnt=n_distinct(transID)) %>%
+                        spread(key =timings, value= timing_cnt) %>%
+                        mutate(Morning = replace_na(Morning, 0),
+                               Afternoon = replace_na(Afternoon, 0),
+                               Evening = replace_na(Evening, 0),
+                               total = sum(Morning,Afternoon,Evening),
+                               Morning = Morning/total,
+                               Afternoon = Afternoon/total,
+                               Evening = Evening/total
+                               ) %>%
+                        select (New.ID,Morning,Afternoon,Evening)
+                        
+
+###Differentiating between customer transactions that happen on Weekdays and weekend
+CP_loyalty_week <- CP_loyalty_base %>%
+                        mutate( weekend = case_when(( Wk_day %in% c(1,7)) ~ "weekends",
+                                                    TRUE ~ "weekdays"))%>%
+                        group_by(New.ID,weekend)%>%
+                        summarise(weekend_cnt=n_distinct(transID)) %>%
+                        spread(key = weekend, value = weekend_cnt) %>%
+                        mutate(weekdays = replace_na(weekdays, 0),
+                               weekends = replace_na(weekends, 0),
+                               total = sum(weekdays,weekends),
+                               weekdays = weekdays/total,
+                               weekends = weekends/total
+                               ) %>%
+                        select (New.ID,weekdays,weekends)
+## Identifying the different number of categories that the customers buy from in each transaction
+CP_loyalty_cat <- CP_loyalty_base %>%
+                        group_by(New.ID)%>%
+                        summarise(Category=n_distinct(Category)) %>%
+                        select(New.ID,Category) 
+
+CP_final <-  CP_loyalty_aggr %>%
+                left_join (CP_loyalty_hrs, by = ('New.ID'))%>%
+                left_join (CP_loyalty_week, by = ('New.ID')) %>%
+                left_join (CP_loyalty_cat, by = ('New.ID'))  
+                
+```
+We define the morning as store hours prior to 11am. We define the afternoon as store hours between 11am and 4pm. We define the evening as store hours after 4pm. We based this distinction off or the chart in the **Central Perk average volume and revenue by hour** section. This being said, the bins are somewhat arbitrary and we assume that hours within them behave similarly and differently from hours in the other bins. Weekdays are Monday through Friday, weekends are Sunday and Saturday. We also count the number of distinct categories a customer has purchased as a variable. This means that a customer could have ordered the same 5 distinct products 5 times and have the same value as a customer that ordered 5 distinct products hundreds of times. 
+
+We write the data to disk for easy access later.
+```{r eval=F}
+# write reshaped data to disk
+write.csv(CP_final,"CP_final.csv",row.names= F)
+```
+
+We read the data in for principal components analysis.
+```{r}
+# write reshaped data to disk
+CP_final <- fread("CP_final.csv")
+```
+
+## Part 2 - Principal Components Analysis - feature selection  
+
+### Generating the principal components  
+We are ultimately clustering with the following 9 numerical features:  
+  
+1. Number of transactions
+2. Items per Transaction
+3. Sales Total
+4. Percentage of visits in the morning
+5. Percentage of visits in the afternoon
+6. Percentage of visits in the evening
+7. Percentage of visits on weekdays
+8. Percentage of visits on weekends
+9. Distinct categories purchased  
+  
+we want to use principal component analysis before we cluster our customers. This will allow the clustering algorithm to converge more quickly and should help focus our results. We do not want to overwhelm the algorithm with high dimensionality.    
+```{r}
+cp.pca <- prcomp(CP_final[, 2:ncol(CP_final)],
+                 center = TRUE,
+                 scale. = TRUE)  # normalization occurs here
+
+# plot method
+plot(cp.pca, type = "l", main="PCA Elbow Plot")
+# summary method
+summary(cp.pca) ## 6 components to get more than 99% variation in the data
+```
+Over 99% of the variation in data is explained by the 6 Principal components as illustrated in the summary table. The elbow plot shows that we see a big drop between PC5 and PC6 so we should most likely use 6 components in our clustering.  
+
+## Part 3 - Determining optimal clusters 
+
+### Elbow Plot
+To determine the optimal number of clusters we look at the within group SSE (sum of errors) for different number of clusters. We use K-Means clustering because the algorithm is defined to work with numerical data and it is computationally efficient.  
+```{r}
+# Store PCs in dataframe to use in clustering
+comp <- data.frame(cp.pca$x[,1:6])
+
+# Generate elbow plot
+wss <- (nrow(comp)-1)*sum(apply(comp,2,var))
+set.seed(0)
+for (i in 2:8) wss[i] <- sum(kmeans(comp, centers=i, 
+                                    nstart=5, iter.max=500, algorithm="Lloyd")$withinss)
+plot(1:8, wss, type="b", xlab="Number of Clusters",
+     ylab="Within groups sum of squares", main="K-Means Elbow Plot")
+```
+It is hard to see where we should select the number of clusters at. This leads us to generate silhouette coefficients next.
+  
+
+### Silhouette Plot
+In order to generate silhouette coefficients to help us identify the optimal number of clusters, we need to create a distance matrix. The matrix is computationally intensive to generate and requires a significant amount of memory. Because of this we sample 30% of our data to generate coefficients with.
+```{r}
+rm(list=setdiff(ls(), c("cmd", "col1","col2", 
+                        "col3", "myTheme", "Central_Perk", "CP_final", "comp")))
+
+set.seed(0)
+sample_rows <- sample(nrow(comp), 0.3 * nrow(comp))
+comp_samp <- comp[sample_rows,]
+distance_matrix <- dist(comp_samp, method ="euclidean")
+```
+
+```{r}
+set.seed(0)
+sil_curve <- c(0)
+for (k in 2:8) {
+  kcluster <- kmeans(comp_samp, k)
+  clusts <- kcluster$cluster
+  sil_result <- silhouette(clusts, distance_matrix)
+  sil <- mean(sil_result[,3])
+  sil_curve[k] <- sil
+}
+```
+
+```{r}
+plot(2:8, sil_curve[2:8], type="b", 
+     xlab="Number of Clusters", ylab="Silhouette", main="Silhouette Coefficients")
+```
+The optimal silhouette coefficient would be 1. We can see that the coefficient is maximized at k = 7. This leads us to set k = 7 as our optimal level of k.
+
+## Part 4 - Clustering with K-Means  
+We are using K-Means in our clustering analysis because all of our features, the 6 principal components, are numerical and continuous. K-Means runs very quickly and is easy to understand. For these reasons we employ it here.
+
+### Setting the clustering parameters and summarizing the results  
+We run K-Means on the principal components with a K of 7. We set nstart = 100 so that we find a solution that is closer to the global optimum. Given the size of our data, we set iter.max = 1000 so that the algorithm converges.  
+```{r eval=F}
+n_clust = 7
+
+# Run Kmeans with seed set, no need to loop since we use ntart=100 and iter.max=1000
+set.seed(0)
+cluster_solution <- kmeans(comp, n_clust, nstart=100, iter.max=1000, algorithm="Lloyd")
+# cluster_solution$withinss
+# sum(cluster_solution$withinss)
+cluster_label <- cluster_solution$cluster
+
+# Select optimal Cluster
+clust_data <- cbind(CP_final, cluster_label)
+```
+
+We write the cluster data to disk so that the group can work collaboratively and save computation time.  
+```{r eval=F}
+write.csv(clust_data,"CP_clusters.csv",row.names= F)
+```
+
+Read the cluster data for visualization and market basket analysis.  
+```{r}
+clust_data <- fread("CP_clusters.csv")
+```
+
+Create a table of the number of customers in each cluster to see how the partitioning algorithm worked at a high level.  
+```{r}
+# cluster sizes
+table(clust_data$cluster_label)
+```
+Clusters 1 and 4 stand out as they both have a very small number of customers relative to the other clusters. It will be interesting to dive into these clusters to further understand them. Cluster 7 is the largest with over 8,000 customers.  
+
+# Visualizing and summarizing the clusters  
+To understand the clusters and why they were selected we visualized them.  
+
+### Reshaping the data for plotting  
+We group the data by clusters and take the mean of each variable we clustered on so that we can understand why the clusters were formed.  
+```{r}
+cluster_groups <- clust_data %>% 
+                           select(-New.ID) %>%
+                           group_by(cluster_label) %>%
+                           summarize_all(funs(mean))
+```
+
+### Plotting all cluster characteristics at once  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to plot all of the cluster characteristics at once to provide the most concise, physically speaking, summary of how our clusters differ. Later we can dive more deeply into how each variable grouping differs by cluster.  
+
+*Execution and Results (including code)*  
+We define the morning as store hours prior to 11am. We define the afternoon as store hours between 11am and 4pm. We define the evening as store hours after 4pm. We based this distinction off or the chart in the **Central Perk average volume and revenue by hour** section. This being said, the bins are somewhat arbitrary and we assume that hours within them behave similarly and differently from hours in the other bins. Weekdays are Monday through Friday, weekends are Sunday and Saturday. We also count the number of distinct categories a customer has purchased as a variable. This means that a customer could have ordered the same 5 distinct products 5 times and have the same value as a customer that ordered 5 distinct products hundreds of times.  
+
+We use a facet plot to visualize all of the variables that we clustered on by cluster. This requires us to reshape the data to make it long. Clusters that are within 10% of the maximum value for the variable they were clustered on are color coded. This helps us understand the choices that the K-Means partitioning algorithm made.  
+```{r fig.width=10, fig.asp=.4}
+# All cluster variables at once
+# https://drsimonj.svbtle.com/plot-some-variables-against-many-others
+
+plot_data <- cluster_groups %>%
+  gather(-cluster_label, key="varx", value="valuex") %>%
+  group_by(varx) %>% 
+  mutate(the_max = ifelse(valuex > 0.9 * max(valuex), 1, 0)) %>%
+  ungroup() %>%
+  mutate(varx = recode(varx, "n_trans" = "Num of Transactions",
+                      "items_per_trans" = "Items Per Transaction", 
+                      "sales_total" = "Avg Lifetime Sales", "weekdays" = "Weekdays", 
+                      "weekends" = "Weekends", "Category" = "Categories Purchased"),
+         cluster_label = as.factor(cluster_label),
+         the_max = as.factor(the_max), 
+         varx = factor(varx, levels=c("Morning","Afternoon","Evening","Weekdays",
+                                "Weekends","Items Per Transaction",
+                                "Num of Transactions","Categories Purchased",
+                                      "Avg Lifetime Sales")))
+
+ggplot(plot_data, aes(x=cluster_label, y=valuex, fill=the_max)) + geom_bar(stat="identity") +
+  facet_wrap(~ varx, scales="free", nrow=2) +
+  labs(y="Value", x="Cluster", title="Cluster Comparisons Across All Clustering Attributes") + 
+  guides(fill=F) + scale_fill_manual(guide=F, values=c(col3, col2)) + myTheme
+```
+*Interpretation*  
+We will go into more depth in the graphics below. However, at the highest level, we can see that we do have distinct clusters. For example, in the top left we can see that clusters 2 and 3 are primarily members that come in the morning We can see from the "Num of Transactions" plot, bottom middle, that cluster 4 does the most transactions for us.  
+
+*Conclusions*  
+Plotting all of the variables by cluster at once illustrates that the K-Means algorithm unquestionably generated distinct customer segments for us to explore more deeply.  
+
+###  Cluster time characteristics 
+
+*Description and Rationale for the Chosen Analysis*  
+We can see that our clustering solution produced distinct clusters, certain clusters are higher in certain features than others. We now need to dive into the features in smaller groups to get a sense for our clusters.  
+
+*Execution and Results (including code)*  
+We use a facet plot to concisely plot the time characteristics of the various clusters. Clusters with feature values within the top 10% of the maximum are highlighted. We use bar charts because they help the eye discern discrete group differences. A key assumption is that the data represents averages of the customers in each cluster. Thus we are taking very granular data and summarizing it in the hope that what we gain in interpretability we do not lose to noise.  
+```{r}
+# Time cluster plots
+plot_data %>%
+  filter(varx %in% c("Morning","Afternoon","Evening","Weekdays","Weekends")) %>%
+  mutate(varx = factor(varx, levels=c("Morning","Afternoon","Evening","Weekdays","Weekends"))) %>%
+  ggplot(aes(x=cluster_label, y=valuex, fill=the_max)) + geom_bar(stat="identity") +
+  facet_wrap(~ varx, scales="free") + scale_y_continuous(limits = c(0,1), labels = scales::percent) + 
+  labs(y="Percent of Transactions", x="Cluster", title="Cluster Time Characteristics") + 
+  guides(fill=F) + scale_fill_manual(guide=F, values=c(col3, col2)) + myTheme
+```
+*Interpretation*  
+Cluster 1 is goes at most times and across all days.  
+Cluster 2 is a morning centric cluster that primarily buys on weekdays.  
+Cluster 3 is a morning centric cluster that primarily buys on weekends.  
+Cluster 4 is goes at most times across all days.  
+Cluster 5 is an evening focused cluster that goes to Central Perk on both weekdays and weekends.  
+Cluster 6 is an afternoon focused cluster that only goes on weekends.  
+Cluster 7 is afternoon and weekday focused.  
+
+*Conclusions*  
+We have identified temporal patterns within our customer segments. Clusters 2 and 7 are weekday oriented. Clusters 3 and 6 are weekend focused. Within days we also observe hourly patterns. Cluster 5 is our sole evening cluster. Clusters 6 and 7 are the only clusters that generate business for us in the afternoon for the most part. If our goal is to smooth demand, we should try to get clusters outside of 2 and 7 to buy with us on weekdays. From an hourly perspective, we should focus on increasing transaction frequency in clusters 5, 6 and 7. This will help smooth our sales because these clusters come in the hours that we experience the lowest sales.   
+
+###  Cluster quantity characteristics   
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand customer behavior and smooth demand, ultimately we want to drive profits. We have observed clusters we can look to to smooth time based demand volatility. Next, we want to explore the revenue we can generate from our customers. Revenue is a function of quantity so that is where we will explore first.  
+
+*Execution and Results (including code)*  
+Once again, we use a facet plot to concisely plot the time characteristics of the various clusters. Clusters with feature values within the top 10% of the maximum are highlighted. We use bar charts because they help the eye discern discrete group differences. A key assumption is that the data represents averages of the customers in each cluster. Thus we are taking very granular data and summarizing it in the hope that what we gain in interpretability we do not lose to noise.  
+```{r fig.width=7, fig.asp=.4}
+# Quantiy cluster plots
+plot_data %>%
+  filter(varx %in% c("Items Per Transaction","Num of Transactions","Categories Purchased")) %>%
+  mutate(varx = factor(varx, levels=c("Items Per Transaction",
+                                      "Num of Transactions","Categories Purchased"))) %>%
+  ggplot(aes(x=cluster_label, y=valuex, fill=the_max)) + geom_bar(stat="identity") +
+  facet_wrap(~ varx, scales="free") + 
+  labs(y="Units", x="Cluster", title="Cluster Quantity Characteristics") + 
+  guides(fill=F) + scale_fill_manual(guide=F, values=c(col3, col2)) + myTheme
+```
+*Interpretation*  
+Clusters 3 and 6 buy the most items per transaction on average.  
+Cluster 4 has the most transactions on average by far (keep in mind that this cluster is composed of less than 100 customers).  
+Cluster 4 also purchases from the greatest variety of categories. Cluster 4 also appears to purchase from a greater variety than the other clusters, save cluster 1.  
+
+*Conclusions*  
+Cluster 4 stands out as a very high quantity cluster, in addition, it appears that these customers also really enjoy trying different items on the menu. It would be advantageous to Central Perk to understand this cluster and focus on transforming other clusters quantity characteristics to be more in line. In this case the number of transactions is a function of how long they have been with us and how frequently they purchase, so cluster 4 represents our most loyal customers. It should be noted that relative to the rest, cluster 1 also has a large number of transactions on average and are loyal as well.
+
+###  Cluster sales characteristics  
+
+*Description and Rationale for the Chosen Analysis*  
+We saw that cluster 4 did not really stand out from a temporal perspective, these customers came at all times of day, weekend and weekdays. However, they were much higher than the other clusters in terms of quantity of transactions and categories purchased. It will be interesting to view the lifetime value of our customers on a per cluster basis.
+
+*Execution and Results (including code)*  
+Clusters with feature values within the top 10% of the maximum are highlighted. We use a bar chart because they help the eye discern discrete group differences. A key assumption is that the data represents averages of the customers in each cluster. Thus we are taking very granular data and summarizing it in the hope that what we gain in interpretability we do not lose to noise.  
+```{r fig.width=5.5}
+# Average Sales
+plot_data %>%
+  filter(varx %in% c("Avg Lifetime Sales")) %>%
+  ggplot(aes(x=cluster_label, y=valuex, fill=the_max)) + geom_bar(stat="identity") +
+  scale_y_continuous(limits = c(0,1000)) +
+  labs(y="Dollars", x="Cluster", title="Cluster Sales Characteristics") + 
+  geom_text(aes(label=paste0("$",round(valuex,0))), vjust=-.2, size=4) + 
+  guides(fill=F) + scale_fill_manual(guide=F, values=c(col3, col2)) + myTheme +
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank())
+```
+  
+*Interpretation*  
+We see that clusters 4 and 1 are our most valuable clusters on a per customer lifetime (average) basis. Both clusters are 1 to 2 factors of 10 more lucrative than the rest of the clusters.  
+
+*Conclusions*  
+Membership is truly valuable at the customer level. Our most valuable cluster in terms of average sales, cluster 4, is composed of less than 100 customers. Yet, this cluster's customers account for a large amount of sales over their lifetimes, we should look at this cluster's purchase pattern temporally to understand if we can smooth demand with our following insights.  
+
+# Smoothing Demand  
+
+#### Map the labels onto the transaction data  
+
+We read back in the cleaned data in order to reshape it to the customer level.  
+```{r eval=F}
+CP_clean <- fread("CP_clean.csv")
+```
+
+We map the cluster labels to the transaction data to get transaction level insights.  
+```{r eval=F}
+CP_clean$cluster_label <- clust_data$cluster_label[match(CP_clean$New.ID, clust_data$New.ID)]
+CP_clean <- CP_clean  %>% mutate(cluster_label = replace_na(cluster_label, "Non-Member"))
+```
+
+We write the cluster data to disk so that the group can work collaboratively and save computation time  
+```{r eval=F}
+write.csv(CP_clean,"CP_clean_clust.csv",row.names= F)
+```
+
+Read the cluster transaction data for visualization.
+```{r}
+CP_clean_clust <- fread("CP_clean_clust.csv")
+CP_clean_clust$Date_time <- ymd_hms(CP_clean_clust$Date_time)
+
+# Creating additional columns
+CP_all <- CP_clean_clust %>%
+  mutate(Season = ifelse(Month %in% c(12,1,2), "Winter", 
+                         ifelse(Month %in% c(3, 4, 5), "Spring", 
+                                ifelse(Month %in% c(6, 7, 8), "Summer", 
+                                       ifelse(Month %in% c(9, 10, 11), "Fall","NA")))),
+         Time_of_day = ifelse(Hour %in% c(6:10), "Morning",
+                              ifelse(Hour %in% c(11:15), "Afternoon",
+                                     ifelse(Hour %in% c(16:21), "Evening","NA"))),
+         Day = ifelse(Hour %in% c(2:6), "Weekday", "Weekend"),
+         member_flag = ifelse(New.ID == "Non-Member", New.ID, "Member"),
+         Date = date(Date_time),
+         D_trans = ifelse(Discounts < 0, 1, 0))
+
+rm(list=setdiff(ls(), c("cmd", "col1","col2", "col3", 
+                        "myTheme", "CP_clean_clust","CP_all", 
+                        "clust_data", "comp")))
+```
+
+## Understanding the Clusters at the Transaction Level  
+
+### High level cluster proportions  
+
+*Description and Rationale for the Chosen Analysis*  
+We have defined our clusters, now it is important to understand the transactions through this lens. To contextualize the following analysis we need to understand the sizes of these clusters and the amount of transactions they represent because this defines their influence on our revenues.  
+
+*Execution and Results (including code)*  
+We use a stacked bar plot colored by cluster to illustrate the ratios of variables that each cluster makes up. The idea is to illustrate the proportion of data that each cluster represents. We provide a numerical summary table as added context. This analysis assumes that customers are of equal value regardless of cluster because this is not an element that we plot or show in the table.  
+```{r fig.width=9, fig.asp=.4}
+custs <- table(clust_data$cluster_label)/length(clust_data$cluster_label)
+trans <- table(CP_clean_clust$cluster_label[CP_clean_clust$cluster_label != "Non-Member"])/
+  sum(CP_clean_clust$cluster_label != "Non-Member")
+plot_data <- data.frame(custs, trans) %>%
+                  select(Var1, Freq, Freq.1) %>% 
+  rename("Cluster"=Var1, `Percent of Members`=Freq, `Percent of Transactions`=Freq.1) %>%
+  gather(-Cluster, key="varx", value="valuex")
+
+ggplot(plot_data, aes(x=varx, y=valuex, fill=Cluster)) + geom_bar(stat="identity") + coord_flip() +
+  labs(title="Clusters as Percentage of Transactions and Members", x=NULL, y="Percent of Total") +
+  geom_text(aes(label=Cluster), position = position_stack(vjust = .5)) + 
+  scale_fill_brewer(guide=F, palette="Spectral") +
+  scale_y_continuous(labels = scales::percent) + myTheme
+```
+```{r}
+cat("Percent of Customers")
+round(custs * 100,2)
+cat("\nPercent of Transactions")
+round(trans * 100,2)
+```
+*Interpretation*  
+We see that clusters 1 and 4 represent very few customers but a much larger, proportionally, amount of transactions. Cluster 4 is less than 1% of customers but nearly 10% of transactions. In comparison, cluster 5 is 18% of customers and less than 10% of transactions. For absolute context, cluster 4 is 58 members and cluster 5 has over 5,000.  
+
+*Conclusions*  
+The gap between Cluster 5 and Cluster 4 in customer count and number of transactions illustrates that our most loyal customers are very valuable. These customers are our FRIENDS.  
+
+```{r include=F}
+clear_axes <- theme(axis.line.x = element_blank(), axis.ticks.x = element_blank(), 
+                      axis.text.x = element_blank(), axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(), axis.text.y = element_blank())
+
+clear_y_axes <- theme(axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(), axis.text.y = element_blank())
+```
+
+## Understanding cluster 4, our most loyal customers  
+
+### Preparing data for cluster-level analyses  
+
+From our exploration of the different types of members of Central Perk, We have identified that cluster 4 are the most loyal and most frequent group of customers. Even though this group comprises only of 58 people, they account for most of the transactions in the last 3 years. However, they visit Central Perk more often and are in general ordering a disproportionately higher number of times. This is shown by the chart **Cluster Quantity Characteristics**. In other words, these 58 people are Central Perk's "Best Friends"!  
+
+Since this is such a niche group, it would be beneficial to find out how these customers differ from other clusters, and how we can use that information to benefit Central Perk's business objectives.  
+
+```{r include = F}
+Central_Perk_clusters <- fread("CP_clean_clust.csv")
+# coerce Date_time column to DT
+Central_Perk_clusters$Date_time <- ymd_hms(Central_Perk_clusters$Date_time)
+
+trans <- unique(Central_Perk_clusters$Date_time)
+trans_mapping <- data.frame(Date_time = trans, transID = seq(0, length(trans)-1))
+trans_mapping <- na.omit(trans_mapping)  # drop NA mapping
+
+Central_Perk_clusters$transID <- trans_mapping$transID[match(Central_Perk_clusters$Date_time, trans_mapping$Date_time)]
+
+Central_Perk_clusters_by_id <- Central_Perk_clusters %>%
+  group_by(transID) %>%
+  summarize(no_of_items = sum(Qty))
+
+Central_Perk_clusters$no_of_items <- Central_Perk_clusters_by_id$no_of_items[match(Central_Perk_clusters$transID, Central_Perk_clusters_by_id$transID)]
+
+Central_Perk_clusters$timings <- case_when(( Central_Perk_clusters$Hour < 11) ~ "Morning", (Central_Perk_clusters$Hour >= 11 & Central_Perk_clusters$Hour < 16) ~ "Afternoon", TRUE ~ "Evening")
+
+Central_Perk_clusters$cluster_label[Central_Perk_clusters$cluster_label == "Non-Member"] <- "NM"
+
+Central_Perk_clusters$Category[Central_Perk_clusters$Category == "Non-Caffeinated Drinks"] <- "NCD"
+```
+
+### Cluster 4 category preferences
+
+*Description and Rationale for the Chosen Analysis*  
+We know that cluster 4 is a special group, they are only 58 members out of more than 30,000 yet they represent 10% of our revenue. They come at a greater variety of times of day than the other clusters which partitioned on one time of day only, see **Cluster Time Characteristics**. Thus, if we can increase their transaction frequency in our off peak hours we can smooth demand. First we need to understand their purchase preferences.  
+
+*Execution and Results (including code)*  
+We use stacked bar charts to illustrate how cluster 4 differs from the rest of Central Perk's customers. These plots are faceted to provide evidence of multiple relationships at once.  
+```{r fig.width = 9, fig.asp=.5}
+plot_data <- Central_Perk_clusters %>% group_by(Category, cluster_label) %>%
+  summarise(prop = n()) %>% mutate(prop=prop/sum(prop)) %>%
+  mutate(indicator=ifelse(cluster_label==4,
+                          "Cluster 4","All Other Customers"), indicator=factor(indicator))
+
+# Percentage of categories ordered by each cluster
+ggplot(plot_data, aes(x = 1, y=prop, fill=indicator)) + 
+  geom_bar(stat = "identity", position="stack") + coord_flip() + 
+  guides(fill=guide_legend(title="Customers")) +
+  facet_wrap(~ Category) + scale_fill_manual(values=c(col3,col1)) +
+  labs(y="\nPercent of Transactions", x=NULL, title="Percentage of categories cluster\n") +
+  myTheme + clear_y_axes + scale_y_continuous(labels=scales::percent) + 
+  theme(panel.spacing = unit(2, "lines"))
+```
+*Interpretation*  
+We can see that cluster 4 generally does not shift its preferences as a proportion of the total by category versus the rest. Given the outsize influence this most loyal cluster has on our transaction volume we might have expected to see more drastic differences across category, but this plot shows that their preference is uniform.  
+
+*Conclusions*  
+It seems there is no clearly discernible factor that separates these members from other clusters, except for their number of transactions. Hence, let's take a look at how their transactions look like on another metric, viz. the the number of items.  
+
+### How cluster 4 differs from the others in terms of transaction volume  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to see if cluster 4 exhibits different behavior at different times of the day in terms of their purchase volume. If they do, we can offer promotions to get them to come more frequently in off hours and smooth demand.  
+
+*Execution and Results (including code)*  
+We use faceted bar charts to illustrate how cluster 4 compares versus the other clusters and non-members in terms of number of items purchased per transaction.  
+```{r fig.width=9, fig.asp=0.5}
+Central_Perk_clusters$ind <- ifelse(Central_Perk_clusters$cluster_label == 4, 1, 0)
+Central_Perk_clusters <- Central_Perk_clusters %>% mutate(timings = factor(timings, levels=c("Morning","Afternoon","Evening")))
+# Avg. number of items per order by time of day and cluster
+ggplot(Central_Perk_clusters, aes(y=no_of_items, x=cluster_label, fill=factor(ind))) + 
+  stat_summary(fun.y = "mean", geom = 'col') + scale_fill_manual(guide=F, values=c(col3, col1)) + 
+  facet_wrap(~ timings) + myTheme + coord_cartesian(ylim=c(1,2.7)) +
+  labs(y="Items per Transaction", x="Cluster", title="Items Purchased by Time of Day") +
+  geom_hline(aes(yintercept=2), color="red", size=2)
+```
+*Interpretation*  
+We can see that all clusters save cluster 4 purchase 2 items on average per transaction. This is illustrated by the red horizontal line.  
+
+*Conclusions*  
+Importantly, cluster 4 averages fewer than 2 transactions in the afternoon and evening. If we can target these specific customers directly with promotions we can increase these bars to 2 items per transaction on average. This would have the effect of increasing demand in the afternoon and evening thus leveling out overall demand. Since cluster 4 has such an outsize impact on total transaction volume, we know that targeting this cluster would have a material effect. Since this cluster is so small we can target the members specifically, since these members are our best friends it will strengthen our relationship in a way that non-personalized promotions would not. We think that offering a 15% discount to the specific members that do not average two items per transaction would be a good place to start because we could alter behavior while retaining a 5% profit margin.  
+
+### Directly identifying the customers in cluster 4 to target  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to see if cluster 4 exhibits different behavior at different times of the day in terms of their purchase volume. If they do, we can offer promotions to get them to come more frequently in off hours and smooth demand.  
+
+*Execution and Results (including code)*  
+We use faceted bar charts to illustrate how cluster 4 compares versus the other clusters and non-members in terms of number of items purchased per transaction.  
+```{r}
+# Avg. number of items by individual cluster 4 members
+clust_data %>%
+  filter(cluster_label == 4 & items_per_trans < 2) %>%
+  select(New.ID, items_per_trans) %>%
+  rename(`Customer ID`=New.ID, `Items Per Transaction`=items_per_trans) %>%
+  arrange(`Items Per Transaction`) %>% head(10)
+
+```
+*Interpretation*  
+Nearly all of Central Perk's most loyal members have averaged fewer than 2 items per transaction over their lifetimes, 45 out of 58 members (list is truncated for presentation purposes). Member 8372 and 567 average just 1 item per transaction.  
+
+*Conclusions*  
+Targeted promotions can be sent to them, especially those individuals with less than 1.5 average items in their baskets. These promotions would aim to increase the number of items these customers purchase in every transaction, so would most likely include a slight discount on the second item purchased in strategically selected categories. For example, a discount of 15% on the additional item would still be within a profit generating margin.  
+
+It is likely that Central Perk has personal knowledge of these customers, since they are so few in number and visit multiple times daily. This knowledge should be leveraged while formulating these promotions.  
+
+If successful, these promotions could result in the following outcomes:  
+1. Increasing overall sales, due to the high volume of their transactions.  
+2. Additionally, pushing these loyal customers to buy 1 more item every time is likely to result in smoothing of sales during the afternoon and evening hours.  
+
+## Transactional seasonality across months and hours
+
+### Observing seasonal variation to recommend the "Lunch Punch"
+
+*Description and Rationale for the Chosen Analysis*  
+We want to increase the frequency that off peak customers come in. In our clustering we saw that clusters 5, 6 and 7 primarily come in on off peak hours, see **Cluster time characteristics**. Additionally, we know that Central Perk has high demand in the hours leading up to lunch but diminishing rapidly at lunch time and afterwards, see **Central Perk average volume and revenue by hour**. A lunch based punch card, "The Lunch Punch", will be available to all members but will end up most likely being used by members of these clusters. A punch card promotes more transactions by offering a free lunch item after a fixed number of transactions. If we can get our off peak members to come more frequently, we will smooth our demand. This demand smoothing can occur at both the hourly and seasonal levels, two areas of our greatest variation. In order to smooth the sales trend for Central Perk, we need to understand how sales differ across months. We can smooth seasonal demand with the punch card by offering fewer punches for free lunch items in some of our lower performing months.  
+
+*Execution and Results (including code)*  
+We use line charts to track the trend for the total number of transactions (volume) across clusters as well as at an overall level. This will help us identify the months with high number of transactions and the months with comparatively lower transactions. We exclude July of 2016 from the underlying data because we do not have a full month of observations and this would skew the analysis.  
+```{r fig.width=7, fig.asp=.55}
+CP_clean_clust$Year <- year(CP_clean_clust$Date_time)
+CP_clean_clust$YM <- paste0(CP_clean_clust$Year,"-",CP_clean_clust$Month)
+
+CP_clean_clust %>%
+  filter(YM != "2016-7") %>%
+  group_by(Year, Month) %>%
+  summarize(ct = n()) %>%
+  group_by(Month) %>%
+  summarize(avg_ct = mean(ct)) %>%
+
+ggplot(aes(x = Month, y = avg_ct)) + 
+  geom_line(stat = "identity", size=1.5, col=col3) +
+  geom_point(col=col2, size=2.5) +
+  scale_x_discrete(limit = month.abb) + 
+  labs(y="Total Transactions\n", x=NULL, 
+       title="Average Monthly Transactions") + 
+  scale_y_continuous(labels = scales::comma) + myTheme
+```
+
+*Interpretation*  
+We observed that November, December, January and February are the four months that have low number of transactions compared to the remaining months.  
+
+*Conclusions*  
+We see that the winter months - November to February - need punch cards with lower number of transaction requirements. We should design two different punch cards - one for the winter months and one for the remaining months. We recommend offering one free item after 5 transactions for the winter months and increasing the threshold to 7 transactions for the remaining months because demand is higher so we can get away with a lighter promotion. We know from the clustering solution that  clusters 6 and 7 will be most likely to take advantage of the lunch time punch card, this graph also informs us that we should add a seasonal promotion to the card as well. We set the minimum number of transactions required before the customers can avail a free item according to the sales trend. Given our assumed margin of 20% we set the punch requirement to 5 because this would be a break even point.  
+
+## Smoothing the evening hours  
+
+### Evening Preferences by Category and Item  
+
+*Description and Rationale for the Chosen Analysis*  
+Central Perk transactions are the lowest during the evening, in our effort to smooth customer transactions throughout the day, we want to inspect what customers that visit during the evening usually purchase. Specifically, we want to find any items or categories that are dis-proportionally favored during the evening that could be used as a main draw to attract customers to the cafe in the evening. Cluster 5 is almost entirely comprised of members that purchase from Central Perk during the evening, so we will use that cluster as our benchmark for potential recommendations.  
+
+*Execution and Results (including code)*  
+We use a relative bar plot to illustrate the difference between the evening cluster, cluster 5 and the rest of the customers.  
+```{r include=F}
+# Only transactions from cluster 5
+clust5 <- CP_clean_clust %>% filter(cluster_label == 5)
+# Every other transaction
+clust <- CP_clean_clust %>% filter(cluster_label != 5)
+
+# Observations on a categorical level
+cat<- table(clust$Category)
+cat5 <- table(clust5$Category)
+
+cat_prop <- prop.table(cat)
+cat5_prop <- prop.table(cat5)
+
+cat <- as.data.frame(cat_prop)
+cat5 <- as.data.frame(cat5_prop)
+
+# Binding columns
+combine <- merge(cat, cat5, by = "Var1")
+combine[,2:3] <- round(combine[,2:3], 3)
+# Subtracting differences
+combine$diff <- combine$Freq.y - combine$Freq.x
+combine[,2:4] <- combine[,2:4]
+
+combine <- combine[order(-combine$diff), ]
+final <- combine[1:5, ]
+```
+
+```{r}
+ggplot(final, aes(reorder(Var1, -diff), diff)) + 
+  geom_bar(stat="identity", fill=col1) + 
+  scale_y_continuous(labels = scales::percent) + myTheme +
+  labs(title="Differenced Proportion by Category", 
+       x="Top 5 Differenced Categories\n", y="Difference\n", subtitle="Evening Cluster versus the Rest") + 
+  geom_text(aes(label=scales::percent(round(diff,3))), vjust=-.2, size=4)
+```
+We can see that the evening cluster prefers tea, extras and non-caffeinated drinks more than the non evening clusters and non-members. 
+
+Next we look into our observations at the item level.  
+```{r include=F}
+# Tables for total transactions per item
+items <- table(clust$Item)
+items5 <- table(clust5$Item)
+
+items_prop <- prop.table(items)
+items5_prop <- prop.table(items5)
+
+items <- as.data.frame(items_prop)
+items5 <- as.data.frame(items5_prop)
+
+# Binding columns
+combine <- merge(items, items5, by = "Var1")
+combine[,2:3] <- round(combine[,2:3], 3)
+# Subtracting differences
+combine$diff <- combine$Freq.y - combine$Freq.x
+combine[,2:4] <- combine[,2:4]
+
+combine <- combine[order(-combine$diff), ]
+
+final <- combine[1:10, ]
+```
+
+```{r}
+ggplot(final, aes(reorder(Var1, -diff), diff)) + geom_bar(stat="identity", fill=col1) +
+  scale_y_continuous(labels = scales::percent) + myTheme +
+  labs(title="Differenced Proportion by Items", 
+       x="Top 10 Differenced Categories\n", y="Difference\n", 
+       subtitle="Evening Cluster versus the Rest") + 
+  geom_text(aes(label=scales::percent(round(diff,3))), vjust=-.2, size=4)
+```
+
+*Interpretation*  
+At a categorical level, tea is favored the most by members that visit during the evening compared to general transactions. Extras and non-caffeinated drinks are also favored by evening members, but to a lesser degree. At an item-specific level, small tea has the largest difference between evening members compared to general purchases.  
+
+*Conclusions*  
+As shown previously, cluster 5 is the only cluster that has a significant amount of transactions during the evening. In an effort to attract additional customers during the evening hours, Central Perk could capitalize on the interests of cluster 5 to create evening promotions. At both a categorical and item level, tea has the largest difference in proportion of purchases for cluster 5 members compared to all other transactions. Overall, our results indicate that tea could be used as the central component of an evening promotion in an effort to attract an increased amount of customers during the evening. 
+
+### Tea and non-caffeinated drinks - members  
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand if there are products that sell well in the off peak hours so that we can push those products to bring in a higher transaction frequency during the off hours. We want to see if tea and other non-caffeine items are sold more during the evenings from rest of the day, We'd like to see the general trend in sales of these two categories during the day by hour to validate our finding because most of the items in general are sold in the mornings as we saw earlier. One of Central Perk's primary goals is to smooth demand, so if these products are evening oriented they could be very useful.  
+
+*Execution and Results (including code)*  
+Net Sales in tea and non-caffeine categories for each hour in a day is plotted to observe the general trend of sales in these two categories.  
+```{r}
+# Filter for Tean and Non-Caffeinated drinks
+Eve_catg_sls <- CP_all %>%
+  filter(Category %in% c("Non-Caffeinated Drinks", "Tea")) %>%
+  group_by(Hour) %>%
+  summarise(sales = sum(Net.Sales))
+
+ggplot(Eve_catg_sls, aes(x = Hour, y = sales)) +
+  geom_bar(stat="identity", fill=col1) + 
+  labs(title="Sales for Tea and Non-Caffeine Categories by Hour",
+       y="Net Sales",x="Hour") + 
+  scale_x_continuous(breaks=seq(1,24)) +
+  scale_y_continuous(breaks=seq(0, max(Eve_catg_sls$sales)*1.2, 1000), 
+                     limits=c(0,max(Eve_catg_sls$sales)*1.2)) +
+  myTheme
+
+```
+
+*Interpretation*  
+We can see that sales for these two categories combined are peaking towards the evening hours unlike the general sales trends we observed in the **demand volatility** section. This could mean that customers prefer items in these two categories during the evening hours. We can leverage the items in these two categories to increase our sales during the evening period and potentially smooth the demand across the day.  
+
+*Conclusions*  
+To leverage the tea and non-caffeine categories in the evenings, Central Perk could offer discounts on items in these categories to attract more people to buy those items in the evenings which would lead to increase in sales during evenings and smoothing of demand across day.  
+
+### Tea and non-caffeinated drinks - non-members, smoothing benefits  
+
+*Description and Rationale for the Chosen Analysis*  
+From the cluster results, we saw that cluster 5 were the member customers who buy items primarily in the evening hours. We also want to see other customers who come during the evening hours, including non-members. So we look into buying pattern of non-members vs members within Categories during evenings. Ideally we could target members with our promotions and loyalty programs and get external benefits like smoothing from non-members if they come at non peak times.
+
+*Execution and Results (including code)*  
+We look at the percentage distribution of sales for members and non-members across each category during the evening hours using stacked bar plots.
+
+```{r include=F}
+# Filter for evening hours and 
+catg_mem_sls <- CP_all %>%
+  filter(Time_of_day == "Evening") %>%
+  group_by(Category, member_flag) %>%
+  summarise(sales = sum(Net.Sales))
+
+catg_sls <- CP_all %>%
+  filter(Time_of_day == "Evening") %>%
+  group_by(Category) %>%
+  summarise(catg_sales = sum(Net.Sales))
+
+catg_mem_gph <- catg_mem_sls %>%
+  left_join(select(catg_sls, Category, catg_sales), by = c("Category" = "Category")) %>%
+  mutate(catg_mem_pct = sales / catg_sales)
+```
+
+```{r fig.width=8, fig.asp=.6}
+ggplot(catg_mem_gph, aes(x=Category, y = catg_mem_pct, fill = member_flag, col=)) +
+  geom_bar(stat="identity") + 
+  labs(title="Proportion of sales by Members vs Non-Members",
+       y="Percentage of sales\n",x=NULL, subtitle="Across Categories") +
+  scale_fill_manual(values=c(col1,col3)) +
+  guides(fill=guide_legend(title="Membership")) + 
+  myTheme + scale_y_continuous(labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) + 
+  geom_text(aes(label=scales::percent(round(catg_mem_pct,3))), 
+            position=position_stack(vjust=.5), size=4) + 
+    annotate("rect", alpha = 0, color="red", size = 2, xmin = 1.5, xmax = 2.5,
+        ymin = -.01, ymax = 1.01)
+```
+*Interpretation*    
+Non-members have higher proportion of sales in beer and marginally in tea, non-caffeine and coffee categories as well. 
+
+*Conclusions*  
+Now that we know non-members in particular consume beer in higher proportion than other categories, we would want to know the potential reason for this pattern. One aspect of that could be the discounts that are frequently being offered in this category.
+
+### Discounts attract non-members
+
+*Description and Rationale for the Chosen Analysis*  
+We want to know the reason for higher proportion of sales in beer contributed by non-members than other categories. One aspect is to look at the discounts that are being offered to these customers. If discounts in the evening make more non-members go at these times this would be very helpful in smoothing demand.
+
+*Execution and Results (including code)*  
+We look at the distribution of discounts for members and non-members especially during the evenings across each category using bar plots.
+
+```{r fig.width=8, fig.asp=.6}
+# Discounts during evening hours
+catg_mem_dis_e <- CP_all %>%
+  filter(Time_of_day == "Evening") %>%
+  group_by(Category, member_flag) %>%
+  summarise(disc = sum(abs(Discounts)))
+
+catg_dis_e <- CP_all %>%
+  filter(Time_of_day == "Evening") %>%
+  group_by(Category) %>%
+  summarise(catg_disc = sum(abs(Discounts)))
+
+catg_mem_gph_dis_e <- catg_mem_dis_e %>%
+  left_join(select(catg_dis_e, Category, catg_disc), by = c("Category" = "Category")) %>%
+  mutate(catg_mem_pct = disc / catg_disc)
+
+ggplot(catg_mem_gph_dis_e, aes(x=Category, y = disc, fill = member_flag)) +
+  geom_bar(stat="identity", position = "dodge") + 
+  labs(title="Discounts for Members vs Non-Members",
+       y="Discounts\n",x=NULL, subtitle="Across Categories") +
+  scale_fill_manual(values=c(col1,col3)) +
+  guides(fill=guide_legend(title="Membership")) + 
+  myTheme + scale_y_continuous(labels = scales::dollar) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) + 
+  annotate("rect", alpha = 0, color="red", size = 2, xmin = 1.5, xmax = 2.5,
+      ymin = -1, ymax = 440)
+  
+```
+*Interpretation*    
+Non-members are attracted to more than double the discounts in the beer category than the members. This could mean that non-members are attracted to discounts more than the members in the evenings.  
+
+*Conclusions*  
+From the figures, we could make a fair assumption that, discounts attract non-members to visit the shop outside of our peak hours (the morning). Thus, our recommendation to slash prices on tea and non-caffeine drinks would attract non-members as well into visiting the shop more contributing to higher sales in the evenings that could further smooth the demand across the day.  
+
+## Conclusions from smoothing analysis
+
+1. Central Perk can smooth in the afternoon and evening hours by targeting its best members, cluster 4, with targeted combo promotions in the afternoon and evening hours.
+2. The Lunch Punch promotion will be available to all members, however, we expect our afternoon clusters, 6 and 7 to take the greatest advantage of this promotion. Having these clusters come more frequently in the afternoon will level out demand. Additionally, adding a seasonal element to the punch, fewer punches in the winter than the summer, should help smooth some seasonal variation.
+3. Targeting evening items like tea and non-caffeinated beverages with promotions for all customers. This will cater to cluster 5 which prefers tea and to non-members who like to come in off peak hours and love discounts.  
+
+# Refining the brand  
+We think Central Perk is not properly focusing its offerings. To help Central Perk refocus, we have done category and product level analysis on their offerings.  
+
+### Understanding profit by category
+
+*Description and Rationale for the Chosen Analysis*  
+we want to find the distribution of profits of each category so that we can get a general sense of demand for Central Perk products.   
+
+*Execution and Results (including code)*  
+To do this, we will use a bar plot to visualize the differences between categories. We summarize the data at the category level and assume a 20% profit margin.  
+```{r}
+clust <- CP_clean_clust
+clust$profit <- (clust$Net.Sales - clust$Cost)
+
+categories <- clust %>% group_by(Category) %>% summarise(total = sum(profit))
+categories <- categories[categories$Category != 'None', ]
+ggplot(categories, aes(reorder(Category, -total), total)) + 
+  geom_bar(stat = 'identity', fill = col1) + 
+  scale_y_continuous(labels = scales::dollar) + myTheme +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) +
+  labs(title="Profit by Category", x=NULL, y="Total Profit")
+```
+*Intepretation*  
+Coffee accounts for an overwhelming majority of Central Perk profits, this indicates that Central Perk. Because their existing customer base has a high demand for coffee, it should be a central component of their business structure going forward. 
+
+*Conclusions*  
+This plot indicates that coffee is a large contributor to Central Perk's profits, and should be a focus for their future business ventures. While coffee has clearly been the top performing category for Central Perk, there are some categories that have been lacking in profits, we will have a closer examination of the worst performing categories.  
+
+### Poor performing categories
+
+*Description and Rationale for the Chosen Analysis*  
+The previous inspection of profits by category conveyed that coffee accounts for a large portion of Central Perk's profits, but there are some categories that are lacking in financial performance. We will take a closer inspection of the non-caffeinated drinks, cereal, and beer categories.
+
+*Execution and Results (including code)*  
+To do this, we will use a bar plot to visualize the differences between categories, only including non-caffeinated drinks, cereal and beers. We summarize the data at the category level and assume a 20% profit margin.  
+```{r}
+bottom <- categories[categories$Category %in% c('Non-Caffeinated Drinks', 'Cereal', 'Beers'), ]
+
+ggplot(bottom, aes(reorder(Category, -total), total)) + 
+  geom_bar(stat = 'identity', fill = col1) + 
+  scale_y_continuous(labels = scales::dollar, limits = c(-500, 4000)) + myTheme +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) +
+  labs(title="Profit by Category", x=NULL, y="Total Profit\n") + 
+  geom_text(aes(label=paste0("$",round(total,0))), vjust=-.2, size=4)
+```
+*Intepretation*  
+Non-caffeinated drinks do not have a large sum of profits, but it is noticeably larger than cereal and beers. cereal has a minuscule total of profits, so that may be a category that Central Perk may want to discard in the future. Beers has actually yielded negative profits during the observed time period.  
+
+*Conclusions*  
+Non-caffeinated drinks have not been a top performing category for Central Perk, but it has been serviceable. We think that these drinks could help smooth demand in the afternoon and evening periods so we recommend keeping them. Cereal has not had much positive performance, and beers have negatively impacted Central Perk. Before making final recommendations for changes to these categories, we will look to see if either of these categories are favorites of Central Perk members.  
+
+### Increasing revenues and cutting losses at the per unit level
+
+*Description and Rationale for the Chosen Analysis*  
+We would like to know what categories brings us the most average profits based on the assumptions we made earlier i.e. profits are 20% on the Gross sales of the item. We can leverage this information by adjusting the price on the items to increase sales.
+
+*Execution and Results (including code)*  
+We look at the average profits made by each Category plotted using bar plots. We assume a 20% margin per item. We plot the absolute dollar value taken from this 20% margin which is important to keep in mind.    
+```{r}
+Avg_margin <- CP_all %>%
+  mutate(Margin = (Net.Sales - Cost)/Qty) %>%
+  group_by(Category) %>%
+  summarise(avg_margin = mean(Margin))
+
+ggplot(Avg_margin, aes(x=Category, y = avg_margin)) +
+  geom_bar(stat="identity", fill=col1) + 
+  labs(title="Average Profits per Item across Categories",
+       y="Average Profits\n",x="Categories") +
+  guides(fill=guide_legend(title="Membership")) + 
+  myTheme + scale_y_continuous(limits = c(-2,4), labels = scales::dollar) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1)) + 
+  annotate("rect", alpha = 0, color="red", size = 2, xmin = .5, xmax = 1.45,
+        ymin = -.05, ymax = 3.1) + 
+  geom_text(aes(label=paste0("$",round(avg_margin,2))), vjust=-.4, size=4)
+```
+*Interpretation*    
+We can see that items in beans category creates the most profit of over $3 per item among all other categories. We can leverage this information by cutting down prices on beans items to increase its sales in general as beans is not a significant category in terms of Net sales as seen earlier. It is also interesting to note that beers Category generates negative Margin.  
+
+*Conclusions*  
+To increase the sales in beans, we could offer 10% discounts on beans items that would bring the Margin down to 10% from 20%. This way, we would still be getting profit per transaction and also potentially generate more customers into buying beans thus creating the increase in sales for the beans category as a whole. This would also support in branding the image of the shop into more of a coffee shop. 
+
+### Poor peforming categories and customer membership proportions  
+
+*Description and Rationale for the Chosen Analysis*  
+Before there are any recommendations made for adjustments to Central Perk's offerings, we want to see if Central Perk members are major proponents of cereal or beers. We do not want to make a recommendation of adjusting current offerings if it may alienate current members.  
+
+*Execution and Results (including code)*  
+The following code is executed 3 different times and then passed to a grid arrange to allow for concise plotting.
+
+```{r}
+p1 <- CP_all %>% count(member_flag) %>% mutate(prop=prop.table(n)) %>%
+ggplot(aes(x=1, y=prop, fill=member_flag)) + geom_bar(stat="identity") +
+  geom_text(aes(label=scales::percent(round(prop,2))), 
+            position = position_stack(vjust = .5), size=4) + 
+  scale_fill_manual(guide=F, values=c(col1, col3)) +
+  labs(title="All Customers", x=NULL, y=NULL) +  
+  scale_y_continuous(labels=scales::percent) + myTheme + clear_axes
+```
+
+```{r include=F}
+p2 <- CP_all %>% filter(Category %in% 'Beers') %>%
+  count(member_flag) %>% mutate(prop=prop.table(n)) %>%
+ggplot(aes(x=1, y=prop, fill=member_flag)) + geom_bar(stat="identity") +
+  geom_text(aes(label=scales::percent(round(prop,2))), 
+            position = position_stack(vjust = .5), size=4) + 
+  scale_fill_manual(guide=F,values=c(col1, col3)) + myTheme + 
+  labs(title="Beers", x=NULL, y=NULL) + 
+  scale_y_continuous(labels=scales::percent) + clear_axes
+
+p3 <- CP_all %>% filter(Category %in% 'Cereal') %>%
+  count(member_flag) %>% mutate(prop=prop.table(n)) %>%
+ggplot(aes(x=1, y=prop, fill=member_flag)) + geom_bar(stat="identity") +
+  geom_text(aes(label=scales::percent(round(prop,2))), 
+            position = position_stack(vjust = .5), size=4) + 
+  scale_fill_manual(values=c(col1, col3)) + myTheme +
+  labs(title="Cereal", x=NULL, y=NULL)  +
+  guides(fill=guide_legend(title="Membership")) +
+  scale_y_continuous(labels=scales::percent) + clear_axes
+
+p4 <- CP_all %>% filter(Category %in% 'Beans') %>%
+  count(member_flag) %>% mutate(prop=prop.table(n)) %>%
+ggplot(aes(x=1, y=prop, fill=member_flag)) + geom_bar(stat="identity") +
+  geom_text(aes(label=scales::percent(round(prop,2))), 
+            position = position_stack(vjust = .5), size=4) + 
+  scale_fill_manual(guide=F, values=c(col1, col3)) + myTheme +
+  labs(title="Beans", x=NULL, y=NULL) + 
+  scale_y_continuous(labels=scales::percent) + clear_axes
+```
+
+```{r echo=F}
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(p3)
+
+grid.arrange(arrangeGrob(p1, p2, p3  + theme(legend.position="none"), p4, nrow=1),
+                   mylegend, nrow=2,heights=c(10, 5),
+             top = textGrob("As a Percentage of Total\n",gp=gpar(fontsize=18)))
+```
+*Intepretation*
+Overall, members make up about 65% of total transactions ~85% of cereal transactions are by members, so it may not be optimal to remove cereal offerings. Only ~45% of beer transactions are by members, which is significantly different compared to the total proportion of sales. Members love beans, 74% are purchased by members versus non.
+
+*Conclusions*
+Beer has resulted in a negative profit, and it is not generally purchased by Central Perk members. Aside from the negative profits, the cost of selling beer in NY is $1,060 for a 3 year permit, which is another negative impact that selling beer has on Central Perk finances [NY Liquour License](https://www.sla.ny.gov/system/files/Retail-Fee-Chart-03162016.pdf). We would conclude that Central Perk discard beer from their offerings. This could be an opportunity for Central Perk to refine their brand image, Coffee has been overwhelmingly the highest demanded category. Central Perk should remove beer from their menu to more accurately reflect a "coffee shop cafe" brand, which would more align with their current sales position. Members buy a large proportion of beans but they do not buy a large amount at the absolute level. We recommend running promotions on beans to members ranging between 10 and 15% to see if the sales can be increased. This will further align Central Perk with coffee in the eyes of the customers.
+
+# Recommendations  
+  
+As illustrated earlier, we have certain clusters that Central Perk can capitalize on to normalize their demand across hours and seasons and we also have certain categories on which Central Perk could tweak their pricing on the items.  
+
+## Normalizing the demand  
+  
+There are 4 groups of customers on which Central Perk could target their promotions and price adjustments. The four important groups are listed below:
+
+* High value customers (cluster 4)
+* Evening customers (cluster 5)
+    + Non-members
+* Afternoon customers (cluster 6 & 7)
+
+### Specific demand based recommendations  
+  
+* High value customers (cluster 4)
+    + Although the percentage of customers in this cluster is 0.18 %, they bring about 9.6% of the transactions for the shop. Since we also know that they buy the least number of items in one transaction, we could offer a discount on any second item for these customers which could potentially lead to more items and sales per transactions.  
+  
+* Evening customers (cluster 5)
+    + Almost all the customers in this cluster visit during the evenings. Although, coffee is the most purchased category, tea and non-caffeine drinks are bought more during the evenings from other times by this cluster. We could leverage this preference by offering 15% discounts on tea and non-caffeine categories for all customers. This would attract more customers from other clusters to take advantage of the discounts during the evenings. 15% discount on items would also ensure that we do not create negative margin on our sales.  
+  
+* Non-members
+    + In extension to the discounts provided during evenings, we know that non-members are attracted when discounts are provided. The evening discounts on tea and non-caffeine items would attract more of non-members and potentially rise the demand of items during evenings.  
+  
+* Afternoon customers (clusters 6 & 7)
+    + Customers in this cluster come primarily during the afternoon but food is still not their top purchased category. We would like to increase the afternoon demand of food items by providing a punch card that would offer a free food item on purchase of 5 food items during winter and 7 food items during summer as we know that the demand of items in Winter in generally lower than other seasons. This would enable the customers to visit the shop more frequently than normal.  
+  
+## Refining the brand  
+  
+We also have few potential strategies which Central Perk could implement to refine their brand to be more coffee centric for their financial gain.  
+
+* Removing beers category
+    + We know that beers are at loss because of the discounts provided. Thus, we recommend Central Perk to stop selling beers altogether because it creates negative margin and possibly beers are bought because of the discounts provided. Since the license to sell beer also costs $1060 for a 3 year permit, beer sales in Central Perk does not generate enough sales to even match the license price. Thus, recommend cutting down beer from the category.  
+  
+* Discounts on beans
+    + Beans create the most margin per item because of their higher cost and its sales in general is 5th among 9 categories. Its possible that customer do not buy enough beans because of its higher price. As a coffee shop, we expect the sales of beans to be higher than what it is currently. So, we could offer a 10% discount (ensuring it does not generate negative margin) on the beans items to boost its sales and possibly contribute to a more coffee focused image.  
+  
+## Conclusion  
+  
+Identifying and extracting customer dynamics is key to normalizing demand through the day. With the customer groups that we have identified, Central Perk should offer customized discounts for different groups of customers. We hypothesize that these targeted discounts will find value in increasing the sales during Afternoons and Evenings especially. This will ensure that sales through the day would be normalized helping them to manage their store operations effectively. We also believe that adjustments to the categories should improve Central Perk's reputation with its members which have proven so valuable to its bottom line.  
+

@@ -1,0 +1,729 @@
+---
+title: 'HW1: Exploratory Data Analytics 6410'
+author: ''
+date: "19 September 2018"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: 2
+---
+
+Coltt Thunstrom,
+Prasanna Rajendran,
+Jordan Boonstra,  
+Henrik Kowalkowski,
+Shashank Singh,
+Shawn Tangen
+
+#The Business Problem and Our Approach
+
+###Our Task
+Our tech consulting firm entered a contract with you to help your firm understand the app market so that you could ultimately develop a successful app.
+
+The challenge is that there are a lot of metrics to consider when crafting an app.
+
+In order to increase the efficacy of our analysis and aid management in making informed decisions, we sought to provide a high level overview of the market and then focus the analysis thereafter. Constraining the lens with which we explored the data provides a set of valuable and concise insights.
+
+##What is Success?
+We define success as minimizing rank (being highly rated), maximizing ratings per day (getting a lot of app ratings) and maximizing average rating (on a scale of 1 to 5). We think that this composite view of success is valuable because it explains a greater amount about what might make an app successful beyond any single dimension. Rank measures the level of success of an app due to increased downloads and higher demand relative to competitors. The average rating measures success in regard to app design (i.e., users enjoy the experience and were inclined to give it an exceptional rating). The number of ratings per day measures the success regarding interactivity of an app (i.e., users felt strongly enough about the app to give it a rating in the store) and may indicate the level at which consumers will use the app multiple times rather than downloading the app and never using it.
+
+However, these dimensions of success are not created equal. We think that the weight of rank must be greater than that of the number of ratings per day which in turn has a greater weight than average rating. Optimizing to these targets in the order defined above will allow us to make a subjective question objective. The best place to start in building an app is with a list of metrics that maximize this composite score. 
+
+#Data Cleaning
+
+Load dependencies
+```{r message=FALSE}
+library(ggplot2)
+library(car)
+library(dplyr)
+library(gridExtra)
+```
+
+
+###Looking at the data is always a good place to start:
+
+```{r}
+orig_data <- read.csv("mobileApps.csv")
+data <- orig_data
+```
+
+```{r}
+summary(orig_data)
+```
+
+We noticed  a few irregularities in the data. First, we found that Amazon had very few observations, only 42. Missing values were not pervasive throughout the file and were limited to the app age and region columns. Some of the file sizes were extreme, up to 2.3 gb, however, it was hypothesized that these were legitimate file sizes for large graphical games or media apps. Some of the ratings ranged above and below the 1 to 5 range for an acceptable rating. Additionally, we had app prices that were greater than the maximum allowable price within the given app store. The maximum price in the Apple App Store is \$999 and \$400 in the Google App Store (see links below). More extensive step by step analysis is provided below.
+
+https://www.mobileworldlive.com/apps/news-apps/google-ups-max-price-for-apps-adds-recording-to-google-play-games/
+https://www.telegraph.co.uk/technology/apple/10255045/16-most-expensive-apps-on-the-App-Store.html
+
+```{r}
+dim(data)
+```
+The data covers 25,129 observations across 19 variables. The data was collected January 9, 2013 to January 15, 2013. For the purposes of our analysis we treated the data as cross sectional.
+
+After compiling summary statistics, the next step in exploration is cleaning the data. The App data is rather extensive, and there were many issues that we addressed before performing any extensive exploratory data analysis 
+
+##Missing Data
+
+The code below is a quick loop that shows how many NA's there are in each column.
+```{r}
+#checking for NAs in the data
+for(i in 1:ncol(data)){
+  cat(colnames(data)[i],sum(is.na(data[,i])), '\n')
+}
+```
+
+The first thing we discovered was the amount of missing data in two of the columns: region and age of the app based on the time between when the current version of the App was released and when the data was collected. Looking at the developer names in relation to the missing region values illustrated that the missing region values for the most part probably came from China. The region variable nulls were missing at random since they appeared to be linked to at least one other feature. An example of the missing region values by developer name is provided below:
+
+```{r}
+set.seed(1)
+sample(levels(orig_data$developer[is.na(orig_data$developer)]), 20)
+```
+
+The next step was to investigate app age. In order to deal with the missing values in App age, we converted the release date and data collection date into Date class so the proper age could be calculated. A new column was created for each, and App age was calculated by subtracting the collection date by the release date and adding one (i.e., the app is one day old on the day it is released since the data are measured at the end of that day).  After creating these columns, there were no missing values in the App age column. The redundant date columns were removed from the data to prevent duplication.
+
+```{r}
+#change to date format and recalculate App age
+data$newcrawl <- as.Date(strptime(as.character(data$crawl_date), "%m/%d/%y"))
+data$newrelease <- as.Date(strptime(as.character(data$release_date), "%m/%d/%y"))
+data$newAppage <- (data$newcrawl - data$newrelease) + 1
+#performing a sanity check to make sure the ages are the same
+data2 = na.omit(data)
+sum((data2$app_age_current_version + 1) - as.numeric(data2$newAppage))
+#drops the redundant columns
+data <- data[,!names(data) %in% c('crawl_date','release_date','App_age_current_version')]
+#checking if App age has NAs
+sum(is.na(data$newAppage))
+```
+
+**A quick check to see if there is any pattern to the missing app age values.**
+```{r}
+missing <- is.na(orig_data$app_age_current_version)
+nulls <- as.numeric(data$newAppage[missing],"days")
+not_nulls <- as.numeric(data$newAppage[!(missing)],"days")
+
+t.test(nulls, not_nulls)
+```
+
+The app age nulls appeared to be a simple data collection issue as we were able to back them out by calculating the crawl date minus the release date and cross validating the difference with the non-null app age values. The mean of the imputed values is roughly the same as our non-null values as illustrated above in the t-test. These values were classified as missing completely at random since their missingness was not correlated with the other features. Ultimately neither region nor app age feature into our analysis. The assumption that we must still make is that the rows with nulls were not tainted in any other way.
+
+##Outliers
+
+We identified abnormalities in the data regarding extreme values and possible outliers. The first outlier we spotted was in App price. Research showed that the maximum App price of the Apple Store is \$1,000, so we decided to remove rows with an App price in the Apple store over \$1,000. Google Play's maximum price is \$400 but there were no Google Play apps between \$400 and \$1000 so we did not remove any rows corresponding to Google Play apps.
+
+```{r}
+#dropping prices above $1000
+data <- data[data$price < 1000,]
+```
+
+Upon further scrutiny of the other columns in the data, the Instagram app has a disproportionate number of ratings from user, most likely due to its popularity. This has the potential to be an outlier and heavily influence outcomes while performing analysis related to rating count. In contrast, removing Instagram from the data set could be detrimental because it captures important differences between the most popular Apps and the least popular ones in the sample. As such, we retained Instagram in the data set. However, for any analyses carried out related to rating count, we removed Instagram.
+
+##Data Transformation
+
+There are many cases where the data can be further cleaned. The average rating of an App is on a scale of 1 to 5. However, the value of 50 appears frequently and the value of 5 never appears. Using the assumption that a rating of 50 is supposed to be 5.0, we replaced 50 with 5.
+
+```{r}
+#replace 50s with 5.0
+data$average_rating[data$average_rating == 50] <- 5.0
+```
+
+There is a column that shows the category of the App, which we assume is determined by either the developer or the app store. There are twelve total classifications contained in the column. However, some of those classifications are extensions of an overarching category. In some cases, the overarching category is defined in the extension. In order to collapse the categories, the Apps that had an extension was re-classified into its parent category. This adjustment removed five categories, leaving seven categories after making this adjustment.
+
+```{r}
+#collapsing game categories
+data$category[data$category == 'Games \xe5\xca'] <- 'Games'
+data$category[data$category == 'Social Networking \xe5\xca'] <- 'Social'
+data$category[data$category == 'Utilities > Notes \xe5\xca'] <- 'Utilities'
+data$category[data$category == 'Music > Radio \xe5\xca'] <- 'Entertainment'
+data$category[data$category == 'News & Magazines > Magazines \xe5\xca'] <- 'Multimedia'
+#drops unused levels
+data$category <- factor(data$category)
+```
+
+Similarly, many of the inputs in the App Developer column has an extension. This was cleaned by simply dropping the extension after the name of the Developer.
+
+```{r}
+#collapsing developer columns
+data$developercollapsed <- sub('\xe5.*','',data$developer)
+```
+
+One column that created confusion was the type classification of an App, which contains the factors free, paid, and grossing. Free and paid Apps are straightforward and understandable, but grossing was more nuanced because some grossing Apps had a price while others did not. A new column that re-classifies grossing Apps as free or paid was created based on whether the price of that App was \$0 or above \$0, respectively. This column was made purely to make sense of the grossing classification. We recognize that this may create duplicates as grossing apps must be either free or paid. We removed the grossing apps for majority of our analyses, as discussed in further detail below.
+
+```{r}
+#turning grossing into free or paid
+data$newapp_type = NA
+for(i in 1:nrow(data)){
+  if(data$app_type[i] == 'grossing' & data$price[i] > 0){
+    data$newapp_type[i] = 'paid'
+  } else if(data$app_type[i] == 'paid'){
+    data$newapp_type[i] = 'paid'
+  }
+  else {
+    data$newapp_type[i] = 'free'
+  }
+}
+```
+
+As mentioned before, there are some apps that have a large number of ratings, and some that have very little, but it is very hard to compare these values as we cannot quantify how long each app has been on the market.  We created a new column to standardize the number of ratings of an App on a per day basis based on the difference between the release date and the crawl date (plus 1). That is, the total number of ratings were divided by app age (measured in days). However, this does not control for which version of the app is being released. This metric may be skewed as one app is on its fifth version and already has high name recognition while another app has just been released for the first time.
+
+```{r}
+#making a column for number of ratings per day
+data$ratings_per_day = round(data$rating_count / as.numeric(data$newAppage, units = 'days'), 3)
+```
+
+Another issue that we addressed was the difference in the number of screenshots allowed by each app store. The screenshots column displays the number of screenshots included on an app's download page in each app store. Stores have a different number of maximum screenshots allowed on the download page (Apple's maximum is ten  compared to eight for Google Play and nine for Amazon). As such, we normalized this data to a 0 to 1 scale in order to see the relative number of screenshots. A max-min normalization was used based on the minimum and maximum for each app store.
+
+```{r}
+#normalizing screenshots
+#checking max and mins
+tapply(data$num_screenshot, data$app_store, max)
+tapply(data$num_screenshot, data$app_store, min)
+data$screenshots_normalized = NA
+for(i in 1:nrow(data)){
+  if(data$app_store[i] == 'Apple'){
+    data$screenshots_normalized[i] = round(((data$num_screenshot[i] - 1) / 9), 3)
+  } else if(data$app_store[i] == 'Google Play'){
+    data$screenshots_normalized[i] = round(((data$num_screenshot[i] - 2) / 6), 3)
+  }
+  else {
+    data$screenshots_normalized[i] = round(((data$num_screenshot[i] - 2) / 7), 3)
+  }
+}
+```
+
+##Final Cleanup and Aesthetics
+
+```{r}
+#dropping Amazon from the data
+data <- subset(data, app_store != "Amazon")
+```
+We dropped the Amazon observations from the app data because there were very few rows of Amazon apps relative to the size of the overall dataset. Specifically, there were only 42 rows related to Amazon apps. Due to the small size, it would be difficult to generate any substantial insights for the Amazon apps.
+
+```{r}
+#add an indicator variable for games
+data$is_game <- ifelse(data$category == "Games", 1, 0)
+data$is_game <- factor(data$is_game)
+
+#define color pallette
+col1 = "#425274"
+col2 = "#f29c38"
+col3 = "grey35"
+
+myTheme <- theme_classic() + theme(axis.text = element_text(size = 10),
+                          axis.title = element_text(size = 12),
+                          title=element_text(size=14))
+```
+We added an indicator column to compare game apps to all other categories given that we decided to focus on game apps (as discussed in more detail later). Constraining our analysis was useful because there is simply too much to present on if we chose to look at every possible relationship in the data.
+
+##Clean Data Summary
+```{r}
+#summary of data after cleaning
+summary(data)
+```
+After cleaning the data, it is clear that most of our data issues have been accounted for as detailed in the step by step analysis. There remain several idiosyncratic problems that we handle on a case by case basis, as we discuss in more detail below. One issue is related to apps with an average rating of 0. These apps do not have an average rating of 0. No one has rated these apps so there should be a null value instead of 0 for rating count and average rating. Therefore, for the purpose of our analysis, we chose to restrict our analysis involving the average rating of apps to apps with ratings from 1 to 5 stars. However, when analyzing rank and ratings per day, we keep the apps with average ratings of 0 in the data.
+
+```{r}
+dim(data)
+names(data)
+```
+Our new dataset after cleaning has 25,082 rows while our original data had 25,129. Additionally, we added seven calculated fields (columns) to the dataset. These include a modified crawl date, modified release date, modified app age, parsed developer names, aggregated app type, ratings at a daily rather than absolute level, the normalized value for screenshots, and an indicator variable for whether the app is a game.
+
+#An Overview of the General Market
+
+###How Does Rank Inform the Category We Should Choose?
+
+*Description and Rationale for the Chosen Analysis*  
+The app category is the most differentiating factor in terms of the creation of an app. Creating a game is one thing, but betting big on a social network app is another. In order to narrow our analysis we considered the categories from which the most popular apps came. By isolating the most successful apps by category, we sought to understand what makes apps in each category successful.
+
+*Execution and Results (including code)*  
+We chose to subset the cleaned app data by rank positions less than or equal to 25 because we think that the top 25 apps represent a good balance between success and simplicity. The overall sample is heavily weighted towards games so it also made sense to use the top 25 because the sheer number of game apps would have less of an impact on whether an app could make it into the top 25.
+
+```{r, fig.width = 9, fig.asp = .5}
+focus_data2 <- subset(data, newapp_type == "free" & rank <= 25)
+bar_df2 <- setNames(data.frame(table(focus_data2$category)),c("Category","Count"))
+bar_df2$is_game <- ifelse(bar_df2$Category == "Games",1,0)
+
+ggplot(bar_df2, aes(x=Category, y=Count, fill=factor(is_game))) +
+  geom_bar(stat = "identity") +
+  labs(title="Top 25 Free Apps") + 
+  scale_fill_manual(guide=F,values=c(col3, col1)) +
+  geom_text(aes(label=Count), size = 5, vjust=-.2, col = "black") + myTheme
+```
+
+*Interpretation*  
+The plot illustrates the most frequently occurring categories of apps for apps ranked in the top 25 while the data was being collected. The reason there are so many apps is because the data was collected over a seven day period. Additionally, within free apps there are several different dimensions of rankings to which apps belong. A free app could be number 1 in the US Smartphone Google Play App Store or it could be number 1 in the China Apple Tablet App Store. These are just a couple of the potential combinations. This figure shows that games are by far the most frequent category in the top 25 of app rankings.
+
+```{r, fig.width = 9, fig.asp = .5}
+focus_data2 <- subset(data, newapp_type == "paid" & rank <= 25)
+bar_df2 <- setNames(data.frame(table(focus_data2$category)),c("Category","Count"))
+bar_df2$is_game <- ifelse(bar_df2$Category == "Games",1,0)
+
+ggplot(bar_df2, aes(x=Category, y=Count, fill=factor(is_game))) + 
+  geom_bar(stat = "identity") +
+  labs(title="Top 25 Paid Apps") +
+  scale_fill_manual(guide=F,values=c(col3, col1)) +
+  geom_text(aes(label=Count), size = 5, vjust=-.2, col = "black") + myTheme
+```
+
+*Interpretation*  
+The same goes for paid apps as games are also the most frequent category in the top 25 of paid apps.
+
+*Conclusions*  
+Our first concern should be deciding in which category a potential app would be successful. Games appears to be that category as they represent the greatest share of the best ranked apps. Games stand out across both free and paid apps. This indicates that, among successful apps, games tend to be downloaded more frequently. The higher the rank of the app, the more likely to natively show up in the ranking tables and pages which will further generate success. One caveat is that joining a popular category means there is increased competition. However, given the potential growth in the app market, increased competition should not be an issue as increased supply should not outpace growth in demand.
+
+###Median Ratings per Day Indicate that Games and Social Apps are Well Rated
+
+*Description and Rationale for the Chosen Analysis*  
+We understand that games are by far the most popular app category as measured by rank. But, we are also interested in maximizing the number of ratings per day. The number of ratings per day provide a good proxy for how engaged our customer is in the app. Generally, rating systems draw a polarized crowd. They either respond very positively (5 stars) or very negatively (1-2) stars. It is unquestionably good to have people feel strongly (or negatively as it shows engagement) about an app, and the number of ratings per day helps us value this. We need to narrow down our exploration and comparing the number of ratings per day by category will help us do this.
+
+*Execution and Results (including code)*  
+We used the median of ratings per day for game apps and bar charts to create the graph below. We selected the median as it accounts for highly skewed data. The data used are the cleaned data.
+
+```{r, fig.width = 9, fig.asp = .5}
+#Avg_Ratings/day vs Category
+ggplot(data ,aes(x=category ,y = ratings_per_day, fill=is_game)) + 
+  stat_summary(fun.y = "median", geom ='bar') +
+  labs(title="Median Ratings per Day by Category",
+       x="Category", y="Median Ratings per Day") +
+      stat_summary(aes(label=round(..y..,2)), 
+                   fun.y=median, geom="text", size=5, vjust = -.2, col="black") +
+  scale_fill_manual(guide=F,values=c(col3,col1)) + myTheme
+```
+
+*Interpretation*  
+Games and social apps receive the highest number of ratings per day at the median. All of the other categories are tightly packed around 10 ratings per day. The median amount of ratings per day for games is impressive given the opportunity cost associated with them since there are so many. Even with a wide breadth of games to choose from and a finite amount of time to play them in, consumers still engage with game apps as evidenced by the number of ratings per day.
+
+*Conclusions*  
+While Social apps have the highest number of ratings per day at the median, there are two factors that push us to lean towards games. First, the prior analysis indicated that games are ranked better and, more likely, downloaded more often. As mentioned in the business case section of the document, rank is our primary metric because in the case of free and paid apps, it represents a proxy for downloads (though we cannot measure the exact difference in download magnitude). Second, from a domain perspective, there is a secondary investment required to develop a social app as it must operate on a social network platform.
+
+###How Does the Games Category do on Our Third Target Metric, Average App Rating (1-5)?
+
+*Description and Rationale for the Chosen Analysis*  
+As we understand that games do well in both ratings per day and rank, the next logical step is to look into average rating. Average rating is a good proxy for how much people like an app.
+
+*Execution and Results (including code)*  
+The analysis looks at all apps as a whole. However, we excluded Amazon since there are only 42 Amazon observations (over four of the seven days). This means that we are assuming that the distribution of ratings for each category at the Apple and Google Play app stores do not differ materially. That is, a game app rated 4.5 stars in the Apple app store would also have a 4.5 rating in the Google Play app store. The app stores have the same rating scales, which further supports this approach.
+
+Grossing apps were also excluded from the analysis because our preliminary analysis showed that grossing apps were duplicates of free and paid apps. An app that is grossing would be either free or paid, in addition to being grossing. As such, even though there are separate rankings for grossing, we are interested in average rating for this specific analysis. Including grossing apps would include duplicates, which could bias our analysis. Additionally, for rating analysis, we removed apps that received average ratings of 0 stars. These apps have not received any ratings, meaning that users have not provided feedback on their apps. As such, including these observations would distort the overall distribution of average rating.
+
+```{r}
+new_app <- data
+
+# filter grossing
+new_app <- subset(new_app, app_type != "grossing")
+
+# filter app rating = 0
+new_app <- subset(new_app, average_rating != 0)
+
+bar_data <- setNames(aggregate(new_app$average_rating, by = list(new_app$category), FUN = mean), 
+                     c("Category", "Average_Rating"))
+
+bar_data$type <- ifelse(bar_data$Average_Rating >= mean(bar_data$Average_Rating), "above", "below")
+bar_data <- bar_data[order(bar_data$Average_Rating), ]
+bar_data$Category <- factor(bar_data$Category, levels = bar_data$Category)
+bar_data$norm_avg <- round((bar_data$Average_Rating - mean(bar_data$Average_Rating))
+                           /sd(bar_data$Average_Rating), 2)  
+
+# Diverging Barchart
+ggplot(bar_data, aes(x=Category, y=norm_avg, label=norm_avg)) + 
+  geom_bar(stat='identity', aes(fill=bar_data$type), width=.5)  +
+  scale_fill_manual(name=NULL, 
+                    labels = c("Above Average", "Below Average"), 
+                    values = c("above"=col1, "below"=col2)) + 
+  labs(subtitle="Normalized Average Rating from Mobile App Data", 
+       title= "Games get the Best Ratings on Average") + coord_flip() +
+  labs(y="Standard Deviations from the Average", x="App Category") +
+  annotate("rect", xmin=6.5, xmax=7.5, ymin=-.1, ymax=1.6, color="red", alpha=.1) +
+  geom_text(aes(label=norm_avg), size = 4, position = position_stack(vjust = .5), 
+            col = c(rep("black",4),rep("white",3))) +
+  myTheme
+
+#http://r-statistics.co/Top50-Ggplot2-Visualizations-MasterList-R-Code.html#Diverging%20Bars
+#https://ggplot2.tidyverse.org/reference/annotate.html
+```
+
+*Interpretation*  
+The diverging bar plot illustrates that games are the most popular (as measured by average rating) category of app across app stores because they vary with the highest standard deviation above the mean rating across categories. What is impactful is that the majority of categories do not have ratings that differ more than 1 standard deviation from the mean. Notably, social apps do very poorly on this metric, which further supports the decision to pursue a game app rather than a social app.
+
+```{r}
+# ANOVA Test
+cat_aov <- aov(new_app$average_rating ~ new_app$category)
+summary(cat_aov)  # significant relationship at 99.9% level
+TukeyHSD(cat_aov)  # games vary significantly
+
+# Test assumptions
+qqnorm(cat_aov$residuals)
+qqline(cat_aov$residuals, col = "red")
+
+# shapiro.test(cat_aov$residuals) does not matter since n > 5000
+
+leveneTest(new_app$average_rating, new_app$category)  # violate equal variance
+# Education appears to be blowing up the analysis
+setNames(aggregate(new_app$average_rating, by = list(new_app$category), FUN = sd), 
+         c("Category","SD"))
+```
+
+*Interpretation*  
+The ANOVA and Tukey HSD test illustrate that the group means of the categories differ significantly from each other. Specifically, games differ significantly from all other apps. Games have the highest mean rating as well. However, the qq plot and levene's test illustrate that we are violating our assumptions regarding the comparison of means. Normality is not a major issue given the sample size. However, there is little to do about the unequal variances. Thus, we cannot trust these numerical outputs. This is largely due to the skewness of the average app rating data. Most ratings are from 4 to 5 which is the right bound of the distribution.
+
+*Conclusions*  
+We now know that the games category performs very well in terms of rank, ratings per day, and average rating. Its closest competitor is social apps which would prove to be very complex to develop and perform poorly in average rating and rank in relation to games. We need to explore game apps more closely to isolate other areas that we could target to improve the rating of our potential app. Our next question is whether the paid or free model makes more sense for a potential game app.
+
+###Analysis of Game Apps Across App Type by Median Ratings per Day
+
+*Description and Rationale for the Chosen Analysis*  
+We want to explore how number of ratings per day differs for gaming apps across different app type categories of free and paid games. This will help us understand the difference between a free or a paid app in terms of the total number of feedback received. This is a proxy for activity on the app, suggesting that people spend more time in apps with a large number of ratings per day.
+
+*Execution and Results (including code)*  
+We adjusted the analysis of the number of ratings per day by eliminating the 90th percentile from the distribution. We do not want to bias our distribution by analyzing extremely popular apps (e.g., Instagram) that attract a higher number of ratings per day due to their popularity. This is especially valid for apps in the paid category since the top apps are usually occupied by established apps.
+
+```{r}
+
+data_sub <- subset(data, app_type != "grossing" & ratings_per_day > quantile(ratings_per_day,probs=.9))
+ggplot(data_sub ,aes(x=app_type ,y = ratings_per_day)) + 
+  stat_summary(fun.y = "median", geom ='bar', fill=col1) +
+  labs(title="Median Ratings per Day for Game Apps by App Type",
+       x="", y="Median Ratings per Day",subtitle="Values > 90th Percentile Removed") +
+      stat_summary(aes(label=round(..y..,0)), fun.y=median, 
+                   geom="text", size=10, vjust = 1.5, col="white") +
+                   scale_fill_manual(guide=F,values=c(col3,col1)) + 
+                   scale_x_discrete(labels=c("Free","Paid")) + 
+                   myTheme
+```
+
+*Interpretation*  
+We can understand by analyzing the graph that free game apps have a higher median number of ratings per day for the games category. This means that free apps have a stronger influence over consumers to provide ratings over paid apps. Since we have already eliminated extremely popular apps we are able to understand that when comparing similar apps across free and paid, free apps are rated more per day by consumers. This suggests that consumers engage with free apps more actively.
+
+*Conclusions*  
+We can conclude that consumers rate free game apps more often as compared to paid apps. This would enable developers to gain more feedback and hence allow them to refine the app periodically. This is critical for a new developer who develops a gaming apps since it is always likely for the app to have multiple bugs when released and multiple ratings will help the developer to remove these bugs quickly. In addition, it suggests that users are interacting with free apps more frequently than paid apps.
+
+###Analysis of App Type Across Unique Developers in the Gaming Category
+
+*Description and Rationale for the Chosen Analysis*  
+We want to explore how the number of unique developers for the top 100 ranked apps differs across free and paid apps. We try to understand the same by analyzing the number of unique occurrences of the said app across the time period for the app. The above analysis would allow us to understand if it would be easier for an app released by a new developer to attract more customers as a free or paid app in the gaming category. Our reasoning is based on the assumption that a higher number of unique developers in the top 100 rankings would mean fewer large players like Zynga and Rockstar Games to compete with. Those developers are well established and competition would be strong. 
+
+*Execution and Results (including code)*  
+We assume that the count of unique developers is a proxy for the number of established players in the market. Additionally, we assume that this ratio holds across region, device and app store. 
+
+```{r}
+focus_data <- subset(data, app_type == "free" & rank <= 100 & category=="Games")
+h1 <- length(unique(focus_data$developercollapsed))
+
+focus_data <- subset(data, app_type == "paid" & rank <= 100 & category=="Games")
+h2 <- length(unique(focus_data$developercollapsed))
+
+bar_df <- data.frame(app_type = c("free", "paid"), number = c(h1, h2))
+
+ggplot(bar_df, aes(x=app_type, y=number)) + geom_bar(stat = "identity", fill=col1) +
+  geom_text(aes(label=number), size = 10, position = position_stack(vjust = 0.8), col = "white") +
+  labs(title="Free Game Apps Have More Unique Developers",subtitle='(For Apps Ranked <= 100)',
+       y="Count of Developers (Unique)", x="App Type") +
+       scale_x_discrete(labels=c("Free", "Paid")) + 
+       myTheme
+```
+
+*Interpretation*  
+We can understand by analyzing the above graph that there are a greater number of unique developers in the top 100 ranked apps in the free apps subcategory. This would mean that there is a greater number of developers in the free app type as compared to the paid app type indicative of a tougher market to enter over the other.
+
+*Conclusions*  
+As analyzed, we can understand that the number of unique developers is higher across the free apps category. This indicates that there is a higher opportunity for new developers to release an app which would be successful and would not be affected by established developers. There is a better chance for a developer to be successful if an app is released in the free category as compared to paid category.
+
+##Summary of the General Market
+The general market overview portion of the exploratory data analysis indicates that a free game app is a good place to focus the analysis. The following analysis will be conducted under this lens. To be more explicit, all analysis after this point is solely composed of rows containing free game apps, unless noted otherwise.
+
+#Analysis of Free Game Apps
+
+##Distributions of Target Variables
+
+###The Distribution of Rank is Uniform as Expected
+
+*Description and Rationale for the Chosen Analysis*  
+In order to illustrate the relationships between our target metrics and the feature variables we have at hand, it is important to first visualize the metric.
+
+*Execution and Results (including code)*  
+The density plot of rank is calculated for free game apps, which we have decided to target based on the analysis of the general market that we provided above. Rank is calculated across app stores, regions and device types. It is also calculated by payment type, however this is something that we have controlled for by scoping the target metric down to free game apps. Thus, by plotting the distribution of rank and using it in our analysis without splitting it out by the dimensions that compose it, we are assuming that free game apps behave similiarly regardless of the dimensions of rank we have not controlled for.
+
+```{r}
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+ggplot(focus_data2, aes(x=rank)) + geom_density(fill=col2) + 
+  labs(title="Density Plot of Rank", subtitle='Calculated Across Region, App Store and Device', 
+       y="Density", x="Rank") + 
+       myTheme
+```
+
+*Interpretation*  
+The distribution is largely uniform which is to be expected. The rank variable can only take on one value for each level in its dimension, (i.e., in the US Google Play Smart Phone rankings, there can only be one app ranked first). This is important because it illustrates that we can make assumptions about the usefulness of different metrics without worrying to the same extent as with a skewed distribution that rank is behaving differently.
+
+*Conclusions*  
+Rank has a uniform distribution, this is good because it illustrates that across its dimensions, rank has similar counts, since we are assuming that rank behaves similarly for all rank groupings in the free game app data slice, it is important that we have this uniform distribution.
+
+###Density Plot of Ratings/Day for Free Game Apps Illustrates Most Apps get Rated Less than 300 Times per Day
+
+*Description and Rationale for the Chosen Analysis*  
+We want to understand the distribution of the number of ratings received per day by free apps. It will help us understand how users generally respond to apps. Rating an app indicates that the user went out of their way to make a statement. The skew of the distribution will tell us if all apps get rated at a similar rate or if there are certain apps that stand out.
+
+*Execution and Results (including code)*  
+We analyzed the number of ratings per day for free game apps. We zoomed the graph, cutting it at 2,500 ratings per day to make it more interpretable.
+
+```{r}
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+ggplot(focus_data2, aes(x=ratings_per_day)) + geom_density(fill=col2) + 
+  labs(title="Density Plot of Ratings per Day", subtitle='x-axis Truncated for Clarity',
+       y="Density", x="Ratings per Day") + 
+       myTheme + 
+       coord_cartesian(xlim=c(0,2500))
+#https://www.r-bloggers.com/density-plot-with-ggplot/
+```
+
+*Interpretation*  
+On analyzing the density plot, it can be understood that most of the free gaming apps receive ratings in the range of almost 100 per day. This helps us understand what the number of ratings per day should center around. In addition, it suggests that including in-app purchases could enhance interactivity and also be a potential revenue source.
+
+*Conclusions*  
+In order to interpret the analysis, it is important to understand that the vast majority of apps do not get a lot of ratings per day. Ratings per day has a severe right skew which illustrates that the more successful apps are likely getting the bulk of the ratings at a daily level.
+
+###What do Average Ratings Look Like?
+
+*Description and Rationale for the Chosen Analysis*  
+In order to understand how we can maximize revenue while maximizing average rating, it is important to understand the target variable in question. Thus it follows that we should plot its values. Average rating is an interesting variable because it is a continuous feature derived from a discrete generating process. 
+
+*Execution and Results (including code)*  
+The data is filtered down to apps that are free and belong to the game category. Additionally we remove apps with a 0 average rating to not bias the sample downward as these are actually nulls.
+
+```{r}
+focus_data2 <- subset(data, app_type == "free" & category == "Games" & average_rating != 0)
+
+ggplot(focus_data2, aes(x=average_rating)) + geom_density(fill=col2) + 
+  labs(title="Density Plot of Average Rating (1-5)", y="Density", 
+       subtitle="Apps with an Average Rating = 0 were Removed", x="Average Rating (1-5 Stars)") + 
+        myTheme
+
+#https://www.r-bloggers.com/density-plot-with-ggplot/
+```
+
+*Interpretation*  
+The vast majority of ratings fall towards the upper end of the potential values (i.e., close to 5 stars). This means that our data is very left skewed. Most people when they review leave a positive rating (there are also no ratings below 1 since the scale is 1-5). 
+
+*Conclusions*  
+Small changes in average rating mean a lot since the majority of the data falls in the same place. It will be interesting to link this conceptual framework to revenue generating features for free game apps like in app ads and purchases.
+
+##How are Revenue Generation and Our Target Metrics Related?
+
+###In App Ads and Our Target Variables
+
+*Description and Rationale for the Chosen Analysis*  
+It is important to know more about how free game apps interact with revenue generation, since we want to make a profit. The goal is to show how in app ads interact with our target variables, rank, ratings per day and average rating, so that we can make a recommendation about whether to include ads in our prospective game app. If ads result in a lower average rating or ratings per day, or a higher rank, it would lead us to reconsider recommending them. However, if the relationship is flat or positive then it would signal a good avenue to explore as we could generate more revenue from our app with ads without harming our rating.
+
+*Execution and Results (including code)*  
+The data is filtered down to apps that are free and belong to the game category. Additionally, for the average rating plot, we remove apps with a 0 average rating to not bias the sample downward. The analysis assumes that the relationship is the same across region, device and app store since we do not isolate for those variables.
+
+```{r, fig.width = 9, fig.asp = .5}
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+
+# Rank - in app ads
+ad1 <- ggplot(focus_data2, aes(x=in_app_ads,y=rank,fill=in_app_ads)) + 
+  stat_summary(fun.y = "mean", geom ='bar') +
+  labs(title="Rank", x="", y="Rank") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=mean, geom="text", size=4, vjust = 5, col="white") +
+  myTheme + scale_x_discrete(labels=c("", "")) + scale_fill_manual(guide=F,values=c(col2,col3))
+
+# Ratings Per Day - in app ads
+ad2 <- ggplot(focus_data2, aes(x=in_app_ads,y=ratings_per_day, fill=in_app_ads)) +
+  stat_summary(fun.y = "median", geom ='bar') +
+  labs(title="Ratings per Day", x="", y="Median Ratings per Day", fill="") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=median, geom="text", size=4, vjust = 5, col="white")  +
+  myTheme + scale_x_discrete(labels=c("","")) + theme(legend.position="bottom") + 
+  scale_fill_manual(values=c(col2,col3),labels=c("In App Ads","No In App Ads"))
+
+focus_data2 <- subset(data, app_type == "free" & category == "Games" & average_rating != 0)
+# Average Rating - in app ads
+ad3 <- ggplot(focus_data2, aes(x=in_app_ads,y=average_rating, fill=in_app_ads)) + 
+  stat_summary(fun.y = "mean", geom ='bar') +
+  labs(title="Average Rating", x="", y="Average Rating (1-5)") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=mean, geom="text", size=4, vjust = 5, col="white") + 
+  myTheme + scale_x_discrete(labels=c("", ""))  + 
+  scale_fill_manual(guide=F,values=c(col2,col3)) + 
+  scale_y_continuous(limits=c(0,5))
+
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(ad2)
+
+p3 <- grid.arrange(arrangeGrob(ad1, ad2 + theme(legend.position="none"), ad3,nrow=1),
+                   mylegend, nrow=2,heights=c(10, 1))
+
+```
+
+*Interpretation*
+Rank and average rating are largely flat when considering in app ads. Ratings per day, the middle plot, sees a significant boost in daily ratings when viewing through the ad lens. Given our analysis of the distribution of average rating, above, it was apparent that average rating was very left skewed, the values all clustered around 4.5 to 5 stars. Thus the positive relationship between in app ads and rating may seem small, but since we know the distribution, we know that this difference is more significant than it appears.
+
+*Conclusions from Approach:*
+Ads do not appear to have a deleterious effect on our target metrics. Ads will help the app generate revenue so they should be considered as an addition to the final app. Since this is just a simple non-causal relationship, we cannot say that there are no confounding factors at play. For example, apps with ads could be rated more highly because they are free, rather than because they offer great features. Additionally, ads are so ubiquitous that users probably do not consider their presence when rating the apps. This same conceptual framework applies to rank and ratings per day as well.
+
+###How do In App Purchases Impact our Target Variables?
+
+*Description and Rationale for the Chosen Analysis*  
+Our target metrics are either unaffected or positively affected by ads, it will be interesting to assess whether in app purchases are viable as well. In app purchases within a game app make a lot of sense from a domain perspective because games offer different check points where small purchases can unlock new abilities, items or levels. Additionally, the consumer base is used to paying for features in games so there would not be a public backlash.
+
+*Execution and Results (including code)*  
+The data is filtered down to apps that are free and belong to the game category. Additionally, for average rating, we remove apps with a 0 rating to not bias the sample downward. The analysis assumes that the relationship is the same across region and device since we do not isolate for those variables.
+
+```{r, fig.width = 9, fig.asp = .5}
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+focus_data2$in_app_purchase <- relevel(focus_data2$in_app_purchase, "PLUGIN_PURCHASE")
+
+# Rank - in app purchase
+ad1 <- ggplot(focus_data2, aes(x=in_app_purchase,y=rank,fill=in_app_purchase)) + 
+  stat_summary(fun.y = "mean", geom ='bar') +
+  labs(title="Rank", x="", y="Rank") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=mean, geom="text", size=4, vjust = 5, col="white") +
+  myTheme + scale_x_discrete(labels=c("", "")) +
+  scale_fill_manual(guide=F,values=c(col2,col3))
+
+# Ratings Per Day - in app purchase
+ad2 <- ggplot(focus_data2, aes(x=in_app_purchase,y=ratings_per_day, fill=in_app_purchase)) + 
+  stat_summary(fun.y = "median", geom ='bar') +
+  labs(title="Ratings per Day", x="", y="Median Ratings per Day", fill="") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=median, geom="text", size=4, vjust = 5, col="white")  +
+  myTheme + scale_x_discrete(labels=c("","")) + 
+  theme(legend.position="bottom") + 
+  scale_fill_manual(values=c(col2,col3),labels=c("In App Purchase","No In App Purchase"))
+
+focus_data2 <- subset(data, app_type == "free" & category == "Games" & average_rating != 0)
+focus_data2$in_app_purchase <- relevel(focus_data2$in_app_purchase, "PLUGIN_PURCHASE")
+# Average Rating - in app purchase
+ad3 <- ggplot(focus_data2, aes(x=in_app_purchase,y=average_rating, fill=in_app_purchase)) + 
+  stat_summary(fun.y = "mean", geom ='bar') +
+  labs(title="Average Rating", x="", y="Average Rating (1-5)") +
+  stat_summary(aes(label=round(..y..,2)), fun.y=mean, geom="text", size=4, vjust = 5, col="white") +
+  myTheme + scale_x_discrete(labels=c("", ""))  + 
+  scale_fill_manual(guide=F,values=c(col2,col3)) +
+  scale_y_continuous(limits=c(0,5))
+
+mylegend<-g_legend(ad2)
+
+p3 <- grid.arrange(arrangeGrob(ad1, ad2 + theme(legend.position="none"), ad3,nrow=1),
+                   mylegend, nrow=2,heights=c(10, 1))
+```
+
+*Interpretation*  
+The effect of in app purchases on rank and average rating is even starker for in app purchases in relation to the in app ads plot. Having in app purchases results in a free game app that is more than 20 ranks better off on average. The difference seems smaller for average rating, but it too is very positive when we take into consideration the distribution of average rating. In app purchases have less of an effect of on ratings per day at the median than in app ads did. The results of these revenue analyses are interesting, but it does introduce a chicken egg scenario. For example, it is far more likely that the in app purchases in these games are actually valuable so they result in a lower ranked app, rather than including the ability to pay for something is what is causing the difference. From a domain perspective, the takeaway is that in app purchases are a good idea if the developer can pull them off successfully, it is not correct to say that consumers will randomly pay for items in the app so it will do better when viewed through the lens of our target metrics.
+
+*Conclusions*  
+The previous in depth analyses regarding our target metrics: rank, median ratings per day and average rating have illustrated that using ads and plug in purchases is at worst no worse than not have them and at best could actually contribute to the apps success. This being said, it is very important to analyze from the business perspective, we are not establishing causality with exploratory data analysis, we are merely trying to understand a portion of the market. In reality, ads and purchases do not make the app, however, for our intents and purposes they do not need to. Simply not hurting our target metrics is enough. Our recommendation is as follows, a free game app with in app ads and in app purchases presents a viable route to take in order to create a successful app that generates revenue.
+
+#Targeting the Potential Market (Region & App Store)
+The goal of this section is to illuminate the areas where the app should be first targeted as time is a scarce commodity.
+
+###Analysis of Ratings per Day Across Region, Device Type & App Store
+
+*Description and Rationale for the Chosen Analysis*  
+We perform this analysis to understand the effect of different regions (i.e., US and China) across different app stores and devices on the ratings received per day. This would help us identify a specific segment of market most suitable for developers to obtains higher feedbacks which can be utilized to further refine their apps.
+
+*Execution and Results (including code)*  
+Note that this graph is not limited to just free game apps, it uses the full cleaned data set. We assume that there are no major app releases endemic to a specific platform that are significantly skewing the results.
+
+```{r, fig.width = 9, fig.asp = .5}
+# Average ratings per day across two metrics: Appstore / Apptype / Region
+data_sub <- subset(data, region == "US" | region == "CN")
+data_sub$GUS <- ifelse(data_sub$app_store == "Google Play" & data_sub$region == "US", "Y", "N")
+
+ggplot(data_sub, mapping = aes(x = region, y = ratings_per_day, fill=factor(GUS))) +
+  geom_bar(stat = "summary", fun.y = "median") + 
+  facet_wrap(~ app_store + device, nrow = 1) + 
+  stat_summary(aes(label=round(..y..,2)), fun.y=median, geom="text", size=5, vjust = -.2, col="black") +
+  labs(x="", y="Ratings per Day (Median)",
+       title="Median Ratings per Day Across Region/ App store/ Device") + 
+        scale_y_continuous(expand=c(0,150)) + 
+        scale_fill_manual(guide=F, values=c(col3,col1)) +
+        myTheme
+
+```
+
+*Interpretation:*  
+It can be understood that Apps in the US are rated more across both App Stores. Google play is rated significantly more number of times than the Apple apps within US. There is almost a 4 fold increase when comparing the ratings received for Google Play Store in US as compared to China and thereby helps us understand that apps in the Google play store of US receive higher Ratings/Day. Tablets follow the same general trend as smart phone apps, however, we chose not to focus on this physical platform because we do not have any tablet observations for the Google Play Store. 
+
+*Conclusions*  
+As explained above, apps released in Google Play store of US receive higher ratings/day. Therefore, developers looking to release a new app in the Gaming category can first release their app in the US's Google Play store to refine their app more frequently and hence would be able to develop a robust gaming app in a shorter amount of time. Following the development of this app they can then venture into other markets with a fairly refined product and attract more customers.
+
+### Rank by Region
+
+*Description and Rationale for the Chosen Analysis*  
+Preferences in app categories and the type of the app could differ between people in different regions. On concluding that free game apps have a lot of potential in being successful through our previous analysis, we would to see if people in different regions have any difference in preference of app type and app category.
+
+*Execution and Results (including code)*  
+Our assumption here is that free game apps in both the regions have equal chances to be rated by the users. That is, Of 100 users in US, if 50 users are likely to the rate the app, then we assume that there would be same percentage of people who would rate the app in China.
+
+```{r}
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+
+# Plot of rank and device
+ggplot(focus_data2, aes(x=region, y=rank)) +
+  geom_boxplot(alpha=.3,fill=col3) +
+  stat_summary(fun.y=mean, geom="point", shape=20, size=5, color=col2, fill=col2) +
+  labs(x='Region', y = 'Rank', title = 'Ranking by Region') + 
+  myTheme
+
+```
+
+*Interpretation*  
+Free game apps in US have lower median rank which means that people in US download free game apps more frequently than people in China.
+
+*Conclusions*  
+If the developer is seeking to launch a free game app, it is likely that the download of the apps is higher in US than china. Thus, a game developer should give greater importance in making the app successful in US than China.
+
+###How Does Free Gaming Rank Differ by App Store?
+
+*Description and Rationale for the Chosen Analysis*  
+The question we want to answer is whether there is a group of users, iOS or Android, that is more predisposed to gaming apps. Based on the rank metric, this would show up if there was a significant difference in the mean rank between the two groups.
+
+*Execution and Results (including code)*  
+The data was filtered to free game apps and broken into boxplots based on the app store. This assumes that the tablet iOS apps behave similarly to normal iOS apps as Android does not have a tablet app designation.
+
+```{r}
+# Plot of rank and app store
+focus_data2 <- subset(data, app_type == "free" & category == "Games")
+
+ggplot(focus_data2, aes(x=app_store, y=rank)) +
+  geom_boxplot(alpha=.3,fill=col3) +
+  stat_summary(fun.y=mean, geom="point", shape=20, size=5, color=col2, fill=col2) +
+  labs(x='App Store', y = 'Rank', title = 'Ranking of Games in Different App Stores') + 
+  myTheme
+```
+
+*Interpretation*  
+It's hard to tell if there is a difference from the boxplots, a t-test will provide a useful numerical summary of the difference if one exists.
+
+```{r}
+#ttest for rank and app store
+t.test(filter(focus_data2, focus_data2$app_store == "Apple")$rank, 
+       filter(focus_data2, focus_data2$app_store == "Google Play")$rank)
+```
+
+*Interpretation*  
+The t-test is only significant at the 80% confidence level, thus under most criterion we would fail to reject the null hypothesis that there is no difference in means between the two groups.
+
+*Conclusions*  
+Google Play and Apple App Store users have similar preferences in terms of app categories in relation to games specifically. From a ranking perspective there is no reason to target one over the other.
+
+#Final Takeaways
+
+##What Have we Found?  
+1. Game apps perform well across our three target variables of success
+2. Free game apps get more ratings and have less competition from established developers.
+3. In App Ads do not negatively affect our target metrics and In App Purchases have a positive impact on our metrics.
+4. Apps in the US get more ratings per day, and free game apps have a better ranking in comparison to China. Since we are proposing a free app, the U.S. market is more fitting for an initial release.
+5. Apps in the Google Play store get far more ratings per day but the average ranking is no different in comparison to the Apple App Store.
+6. Since the app is set to be posted in the Google Play store, it should be launched on a mobile device because they get much more ratings per day compared to a tablet, and there is no data involving the Google Play store and tablets.
+
+##Final Recommendation  
+We think that there is great success to be had creating a free game app with in app ads and purchases. Creating such an app will allow for the developer to penetrate the market easier because there is less competition from established app-makers. Including in app ads and purchases will be a source of income for the publisher of the app, and offering in-app purchases can help encourage usage of the app and engage its audience. This app should first be targeted in the US, where interaction with ads is greater than that of the Chinese market, be developed for the Google Play store, and launch on a mobile device. We think implementing all of these suggestions will set the app up for long-term sustained success in terms of popularity, usage, and revenue. If this proves to be true, expansion into new markets such as China and the Apple App store will be possible.
